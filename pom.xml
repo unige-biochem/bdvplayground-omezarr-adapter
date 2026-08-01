@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>org.scijava</groupId>
+		<artifactId>pom-scijava</artifactId>
+		<version>45.1.0</version>
+		<relativePath />
+	</parent>
+
+	<groupId>ch.unige.biochem</groupId>
+	<artifactId>bigdataviewer-omezarr-adapter</artifactId>
+	<version>0.1.0-SNAPSHOT</version>
+
+	<name>OME-Zarr adapter for BigDataViewer-Playground</name>
+	<description>Opens OME-Zarr (OME-NGFF v0.4 / v0.5) as SpimData for BigDataViewer and BigDataViewer-Playground.</description>
+	<url>https://github.com/unige-biochem/bdvplayground-omezarr-adapter</url>
+	<inceptionYear>2026</inceptionYear>
+	<organization>
+		<name>University of Geneva - Biochemistry Department</name>
+		<url>https://www.unige.ch/sciences/biochimie/</url>
+	</organization>
+	<licenses>
+		<license>
+			<name>MIT License</name>
+			<url>https://opensource.org/licenses/MIT</url>
+			<distribution>repo</distribution>
+		</license>
+	</licenses>
+
+	<developers>
+		<developer>
+			<id>nicokiaru</id>
+			<name>Nicolas Chiaruttini</name>
+			<url>https://nicolas.chiaruttini.org/</url>
+			<roles>
+				<role>founder</role>
+				<role>lead</role>
+				<role>developer</role>
+				<role>debugger</role>
+				<role>reviewer</role>
+				<role>support</role>
+				<role>maintainer</role>
+			</roles>
+		</developer>
+	</developers>
+	<contributors>
+		<contributor>
+			<name>Nicolas Chiaruttini</name>
+			<url>https://nicolas.chiaruttini.org/</url>
+			<roles><role>founder</role></roles>
+			<properties><id>NicoKiaru</id></properties>
+		</contributor>
+	</contributors>
+
+	<mailingLists>
+		<mailingList>
+			<name>Image.sc Forum</name>
+			<archive>https://forum.image.sc/</archive>
+		</mailingList>
+	</mailingLists>
+
+	<scm>
+		<connection>scm:git:https://github.com/unige-biochem/bdvplayground-omezarr-adapter</connection>
+		<developerConnection>scm:git:git@github.com:unige-biochem/bdvplayground-omezarr-adapter</developerConnection>
+		<tag>HEAD</tag>
+		<url>https://github.com/unige-biochem/bdvplayground-omezarr-adapter</url>
+	</scm>
+	
+	<issueManagement>
+		<system>GitHub Issues</system>
+		<url>https://github.com/unige-biochem/bdvplayground-omezarr-adapter/issues</url>
+	</issueManagement>
+
+	<ciManagement>
+		<system>GitHub Actions</system>
+		<url>https://github.com/unige-biochem/bdvplayground-omezarr-adapter/actions</url>
+	</ciManagement>
+
+	<properties>
+		<package-name>ch.unige.biochem.bdv.img</package-name>
+
+		<license.licenseName>mit</license.licenseName>
+		<license.copyrightOwners>Department of Biochemistry, University of Geneva</license.copyrightOwners>
+		<bigdataviewer-spimdata-extras.version>0.22.0</bigdataviewer-spimdata-extras.version>
+
+		<reflections.version>0.10.2</reflections.version> <!-- for test only -->
+
+		<!-- NB: Deploy releases to the SciJava Maven repository. -->
+		<releaseProfiles>sign,deploy-to-scijava</releaseProfiles>
+
+	</properties>
+
+	<repositories>
+		<repository>
+			<id>scijava.public</id>
+			<url>https://maven.scijava.org/content/groups/public</url>
+		</repository>
+		<repository>
+			<snapshots>
+				<enabled>false</enabled>
+			</snapshots>
+			<id>ome</id>
+			<name>repo</name>
+			<url>https://artifacts.openmicroscopy.org/artifactory/repo</url>
+		</repository>
+	</repositories>
+
+	<dependencies>
+		<!-- other dependencies -->
+
+		<dependency>
+			<groupId>sc.fiji</groupId>
+			<artifactId>bigdataviewer-core</artifactId>
+		</dependency>
+
+		<!-- OME-NGFF metadata parsing (axes, scale/translation, multiscales) and
+		     the N5Factory / Zarr v2+v3 readers. -->
+		<dependency>
+			<groupId>org.janelia.saalfeldlab</groupId>
+			<artifactId>n5-universe</artifactId>
+		</dependency>
+
+
+		<dependency>
+			<groupId>org.reflections</groupId>
+			<artifactId>reflections</artifactId>
+			<version>${reflections.version}</version>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>ch.epfl.biop</groupId>
+			<artifactId>bigdataviewer-spimdata-extras</artifactId>
+			<version>${bigdataviewer-spimdata-extras.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>net.imglib2</groupId>
+			<artifactId>imglib2</artifactId>
+		</dependency>
+
+		<!-- test dependencies -->
+
+		<dependency>
+			<groupId>junit</groupId>
+			<artifactId>junit</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>net.imagej</groupId>
+			<artifactId>imagej</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+	</dependencies>
+
+</project>

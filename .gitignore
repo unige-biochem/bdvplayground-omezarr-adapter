@@ -1,0 +1,10 @@
+/.classpath
+/.project
+/.settings/
+/.idea/
+/target/
+*.iml
+*.releaseBackup
+
+# Native libs extracted by JNA at runtime
+*.dll
