@@ -10,10 +10,10 @@
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
+ * 
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *
+ * 
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -83,6 +83,15 @@ public class OmeZarrOpenerIT {
 	private static final String E_V05_B2RAW =
 			"https://livingobjects.ebi.ac.uk/idr/zarr/v0.5/idr0051/" +
 			"180712_H2B_22ss_Courtney1_20180712-163837_p00_c00_preview.zarr";
+	/** F: v0.5 2D-only (axes {@code y,x}) — the minimal singleton-z case. */
+	private static final String F_V05_2D =
+			"https://livingobjects.ebi.ac.uk/idr/zarr/v0.5/idr0066/ExpD_chicken_embryo_MIP.ome.zarr";
+	/** G: v0.4 2D multichannel (axes {@code c,y,x}) — c hyperslice without a z axis. */
+	private static final String G_V04_2D_MULTICHANNEL =
+			"https://livingobjects.ebi.ac.uk/idr/zarr/v0.4/idr0076A/10501752.zarr";
+	/** H: v0.5 bioformats2raw container of 2D multichannel images. */
+	private static final String H_V05_2D_B2RAW =
+			"https://livingobjects.ebi.ac.uk/idr/zarr/v0.5/idr0033A/BR00109990_C2.zarr";
 
 	private static final double EPS = 1e-6;
 
@@ -231,35 +240,164 @@ public class OmeZarrOpenerIT {
 	}
 
 	// ---------------------------------------------------------------------------
+	// F — 2D-only (no z axis): opened as a single-slice volume
+	// ---------------------------------------------------------------------------
+
+	@Test
+	public void v05_2dOnly_isSingleSliceVolume() {
+		final AbstractSpimData<?> sd = openOrSkip(F_V05_2D);
+
+		assertEquals("timepoints", 1, timepointCount(sd));
+		final List<? extends BasicViewSetup> setups = setups(sd);
+		// No channel axis either — the lone omero channel still names the setup.
+		assertEquals("view setups", 1, setups.size());
+
+		final ViewSetup vs = (ViewSetup) setups.get(0);
+		assertEquals("Cy3", vs.getName());
+		assertArrayEquals("2D image gets a singleton z", new long[] { 6510, 8978, 1 }, sizeXYZ(vs));
+		assertEquals(1.6, vs.getVoxelSize().dimension(0), EPS);
+		assertEquals(1.6, vs.getVoxelSize().dimension(1), EPS);
+		assertEquals("no z axis → identity along z", 1.0, vs.getVoxelSize().dimension(2), EPS);
+		assertEquals("micrometer", vs.getVoxelSize().unit());
+		assertArrayEquals(new int[] { 255, 255, 255, 255 }, // white
+				vs.getAttribute(Displaysettings.class).color);
+
+		// Only x/y are downsampled; z stays at 1 to match the singleton dimension.
+		final MultiResolutionSetupImgLoader<?> sil = (MultiResolutionSetupImgLoader<?>)
+				sd.getSequenceDescription().getImgLoader().getSetupImgLoader(vs.getId());
+		assertEquals("mipmap levels", 8, sil.numMipmapLevels());
+		for (final double[] res : sil.getMipmapResolutions()) {
+			assertEquals("z is never downsampled", 1.0, res[2], EPS);
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// G — 2D multichannel: c is hypersliced although there is no z axis
+	// ---------------------------------------------------------------------------
+
+	@Test
+	public void v04_2dMultichannel() {
+		final AbstractSpimData<?> sd = openOrSkip(G_V04_2D_MULTICHANNEL);
+
+		assertEquals("timepoints", 1, timepointCount(sd));
+		final List<? extends BasicViewSetup> setups = setups(sd);
+		assertEquals("view setups (= channels)", 50, setups.size());
+
+		final ViewSetup first = (ViewSetup) setups.get(0);
+		assertEquals("Total HH3-113In", first.getName());
+		assertEquals(0, first.getAttribute(Channel.class).getId());
+		assertArrayEquals(new long[] { 464, 494, 1 }, sizeXYZ(first));
+		// No spatial calibration in this dataset → identity voxel, "pixel" unit.
+		assertEquals(1.0, first.getVoxelSize().dimension(0), EPS);
+		assertEquals(1.0, first.getVoxelSize().dimension(2), EPS);
+		assertEquals("pixel", first.getVoxelSize().unit());
+		assertArrayEquals(new int[] { 0, 255, 0, 255 }, // green
+				first.getAttribute(Displaysettings.class).color);
+
+		// Every channel is the same 2D image, so all setups share the singleton z.
+		for (final BasicViewSetup vs : setups) {
+			assertArrayEquals("size of setup " + vs.getId(), new long[] { 464, 494, 1 }, sizeXYZ(vs));
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// H — 2D inside a bioformats2raw container (discovery + singleton z together)
+	// ---------------------------------------------------------------------------
+
+	@Test
+	public void v05_2dBioformats2rawContainer() {
+		final AbstractSpimData<?> sd = openOrSkip(H_V05_2D_B2RAW);
+
+		assertEquals("timepoints", 1, timepointCount(sd));
+		final List<? extends BasicViewSetup> setups = setups(sd);
+		assertEquals("9 series x 5 channels", 45, setups.size());
+
+		final ViewSetup first = (ViewSetup) setups.get(0);
+		assertEquals("s0 - Nuclei", first.getName());
+		assertEquals(0, first.getAttribute(Tile.class).getId());
+		assertArrayEquals(new long[] { 2080, 1552, 1 }, sizeXYZ(first));
+		assertEquals(0.3, first.getVoxelSize().dimension(0), EPS);
+		assertEquals(1.0, first.getVoxelSize().dimension(2), EPS);
+		assertEquals("micrometer", first.getVoxelSize().unit());
+
+		// Series are grouped by Tile; the 6th setup starts series 1.
+		final ViewSetup secondSeries = (ViewSetup) setups.get(5);
+		assertEquals("s1 - Nuclei", secondSeries.getName());
+		assertEquals(1, secondSeries.getAttribute(Tile.class).getId());
+		assertEquals("channel restarts per series",
+				0, secondSeries.getAttribute(Channel.class).getId());
+		assertArrayEquals(new long[] { 2080, 1552, 1 }, sizeXYZ(secondSeries));
+	}
+
+	// ---------------------------------------------------------------------------
 	// Pixel path: force a real block load and confirm c/t hyperslicing to 3D
 	// ---------------------------------------------------------------------------
 
 	@Test
 	public void pixelLoad_hyperslicesTo3D() {
 		final AbstractSpimData<?> sd = openOrSkip(A_V04_6001240);
-		final AbstractSequenceDescription<?, ?, ?> seq = sd.getSequenceDescription();
 		final int setupId = setups(sd).get(0).getId();
-		final int tp = seq.getTimePoints().getTimePointsOrdered().get(0).getId();
-
-		final MultiResolutionSetupImgLoader<?> sil =
-				(MultiResolutionSetupImgLoader<?>) seq.getImgLoader().getSetupImgLoader(setupId);
-		final int coarsest = sil.numMipmapLevels() - 1;
-
-		final RandomAccessibleInterval<?> img;
-		try {
-			img = sil.getImage(tp, coarsest);
-		} catch (final NoClassDefFoundError | UnsatisfiedLinkError e) {
-			Assume.assumeNoException("native blosc unavailable for pixel decode", e);
-			return; // unreachable
-		}
+		final RandomAccessibleInterval<?> img = coarsestImageOrSkip(sd, setupId);
 
 		// A single (setup, timepoint) view is always 3D, even though the stored
 		// array has an extra channel dimension that must be hypersliced away.
 		assertEquals("view must be reduced to x,y,z", 3, img.numDimensions());
-		// Reading the center voxel must not throw (exercises cache + codec).
+		assertCenterVoxelReadable(img);
+	}
+
+	/**
+	 * The 2D pixel path: a channel is hypersliced away although the stored array
+	 * has no z axis, and the result must still be a 3D view whose singleton z
+	 * agrees with the dimensions the loader reports (BDV sizes its cell cache from
+	 * those, so a mismatch would corrupt the grid).
+	 */
+	@Test
+	public void pixelLoad_2d_isSingleSliceVolume() {
+		final AbstractSpimData<?> sd = openOrSkip(G_V04_2D_MULTICHANNEL);
+		final AbstractSequenceDescription<?, ?, ?> seq = sd.getSequenceDescription();
+		// Not channel 0, so the hyperslice has to actually move along c.
+		final int setupId = setups(sd).get(7).getId();
+		final int tp = seq.getTimePoints().getTimePointsOrdered().get(0).getId();
+
+		final MultiResolutionSetupImgLoader<?> sil =
+				(MultiResolutionSetupImgLoader<?>) seq.getImgLoader().getSetupImgLoader(setupId);
+		final RandomAccessibleInterval<?> img = coarsestImageOrSkip(sd, setupId);
+
+		assertEquals("2D view must be padded to x,y,z", 3, img.numDimensions());
+		assertArrayEquals("z must be the singleton [0,0]",
+				new long[] { 0, 0, 0 }, img.minAsLongArray());
+		assertEquals("z extent", 0, img.max(2));
+		assertArrayEquals("interval must match the reported image size",
+				new long[] { img.dimension(0), img.dimension(1), img.dimension(2) },
+				sil.getImageSize(tp, sil.numMipmapLevels() - 1).dimensionsAsLongArray());
+		assertCenterVoxelReadable(img);
+
+		// The full-resolution level goes through the same path.
+		final RandomAccessibleInterval<?> full = sil.getImage(tp, 0);
+		assertEquals("full-resolution view is 3D", 3, full.numDimensions());
+		assertArrayEquals(new long[] { 464, 494, 1 }, full.dimensionsAsLongArray());
+	}
+
+	/** Loads the coarsest level of a setup, skipping the test if blosc is missing. */
+	private static RandomAccessibleInterval<?> coarsestImageOrSkip(final AbstractSpimData<?> sd,
+			final int setupId) {
+		final AbstractSequenceDescription<?, ?, ?> seq = sd.getSequenceDescription();
+		final int tp = seq.getTimePoints().getTimePointsOrdered().get(0).getId();
+		final MultiResolutionSetupImgLoader<?> sil =
+				(MultiResolutionSetupImgLoader<?>) seq.getImgLoader().getSetupImgLoader(setupId);
+		try {
+			return sil.getImage(tp, sil.numMipmapLevels() - 1);
+		} catch (final NoClassDefFoundError | UnsatisfiedLinkError e) {
+			Assume.assumeNoException("native blosc unavailable for pixel decode", e);
+			throw e; // unreachable — assumeNoException aborts the test
+		}
+	}
+
+	/** Reads the center voxel, exercising the cache + codec end to end. */
+	private static void assertCenterVoxelReadable(final RandomAccessibleInterval<?> img) {
 		final net.imglib2.RandomAccess<?> ra = img.randomAccess();
-		final long[] c = new long[3];
-		for (int d = 0; d < 3; d++) c[d] = (img.min(d) + img.max(d)) / 2;
+		final long[] c = new long[img.numDimensions()];
+		for (int d = 0; d < c.length; d++) c[d] = (img.min(d) + img.max(d)) / 2;
 		ra.setPosition(c);
 		assertNotNull(ra.get());
 	}

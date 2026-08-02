@@ -30,17 +30,18 @@ import mpicbg.spim.data.sequence.ViewId;
 import org.janelia.saalfeldlab.n5.DataType;
 import org.janelia.saalfeldlab.n5.N5Reader;
 
-import java.util.Arrays;
 import java.util.Map;
 
 /**
  * {@link N5Properties} implementation for OME-Zarr, adapting {@code N5ImageLoader}
  * to the OME-NGFF multiscale layout.
  * <p>
- * Everything is precomputed by {@link OmeZarrOpener}: the per-level dataset paths
- * and the mipmap resolutions. Dimensions and data type are read lazily from the
- * (attribute-caching) {@link N5Reader}. Per-image entries are shared across all
- * of that image's channels and timepoints.
+ * Everything is precomputed by {@link OmeZarrOpener}: the per-level dataset paths,
+ * the mipmap resolutions and the imglib2 dimension of each spatial axis (which
+ * depends on the image's NGFF axes — a 2D image has no {@code z} at all, and is
+ * reported here as a single-slice volume). Dimensions and data type are read
+ * lazily from the (attribute-caching) {@link N5Reader}. Per-image entries are
+ * shared across all of that image's channels and timepoints.
  */
 public class OmeZarrN5Properties implements N5Properties {
 
@@ -48,10 +49,15 @@ public class OmeZarrN5Properties implements N5Properties {
 	static final class ImageEntry {
 		final String[] levelPaths;          // full dataset path per resolution level
 		final double[][] mipmapResolutions; // [level][x,y,z], relative to level 0
+		final int dimX, dimY, dimZ;         // imglib2 dim of each spatial axis; dimZ = -1 when 2D
 
-		ImageEntry(final String[] levelPaths, final double[][] mipmapResolutions) {
+		ImageEntry(final String[] levelPaths, final double[][] mipmapResolutions,
+				final int dimX, final int dimY, final int dimZ) {
 			this.levelPaths = levelPaths;
 			this.mipmapResolutions = mipmapResolutions;
+			this.dimX = dimX;
+			this.dimY = dimY;
+			this.dimZ = dimZ;
 		}
 	}
 
@@ -81,8 +87,14 @@ public class OmeZarrN5Properties implements N5Properties {
 
 	@Override
 	public long[] getDimensions(final N5Reader n5, final int setupId, final int timepointId, final int level) {
-		final String path = byView.get(new ViewId(timepointId, setupId)).levelPaths[level];
-		// The array carries c/t as extra dimensions; the source is the first 3 (x,y,z).
-		return Arrays.copyOf(n5.getDatasetAttributes(path).getDimensions(), 3);
+		final ImageEntry entry = byView.get(new ViewId(timepointId, setupId));
+		final long[] dims = n5.getDatasetAttributes(entry.levelPaths[level]).getDimensions();
+		// The stored array carries c/t as extra dimensions, and a 2D image has no z
+		// axis at all, so the imglib2 dim of each spatial axis is image-dependent.
+		// A 2D image is served as a single-slice volume (z = 1).
+		return new long[] {
+				dims[entry.dimX],
+				dims[entry.dimY],
+				entry.dimZ >= 0 ? dims[entry.dimZ] : 1 };
 	}
 }

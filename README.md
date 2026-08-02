@@ -28,6 +28,7 @@ dataset-path / hyperslice metadata the loader consumes.
 | `time` axis | `TimePoints` (per-timepoint views) |
 | `omero` channels (`label`, `color`, `window`) | a `Displaysettings` entity (spimdata-extras: name + color + contrast) per `ViewSetup` |
 | `bioformats2raw` series (`0`, `1`, …) | one `Tile` per series, all in one dataset |
+| no `z` axis (2D image) | a single-slice volume (`z` size 1) — BDV sources are 3D |
 
 Reading `omero` display settings needs no dependency on BigDataViewer-Playground:
 the information is stored as a serializable SpimData entity, and Playground reads
@@ -41,6 +42,10 @@ it downstream to color the sources.
   probing, so you can pass the container URL directly — you do **not** have to
   append `/0`. Passing an explicit series path (`.../container.zarr/0`) also
   works.
+- **2D images** (axes `y`, `x` with no `z`, optionally `c` and `t`). Since
+  BigDataViewer sources are inherently 3D, these are opened as **single-slice
+  volumes**: `z` has size 1, voxel depth 1 and no calibration along `z`, and only
+  `x`/`y` are downsampled across resolution levels.
 
 Both v0.4 (Zarr v2) and v0.5 (Zarr v3) are auto-detected. Remote URLs
 (`https://…`, S3) and local paths are accepted.
@@ -58,7 +63,6 @@ exported — the XML always points back at the original OME-Zarr.
 
 - HCS plates / wells
 - `labels` (segmentation) groups
-- 2D-only OME-Zarr (an image must have `z`, `y`, `x` spatial axes)
 - Writing / export of pixel data (OME-Zarr is read-only; only the BDV XML is written)
 - Coordinate transformations beyond `scale` + `translation`
 

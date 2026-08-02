@@ -25,6 +25,7 @@
  */
 package ch.unige.biochem.bdv.img.omezarr;
 
+import ch.unige.biochem.bdv.img.omezarr.OmeZarrImageLoader.HyperSlice;
 import ch.unige.biochem.bdv.img.omezarr.OmeZarrN5Properties.ImageEntry;
 import com.google.gson.GsonBuilder;
 import mpicbg.spim.data.SpimData;
@@ -85,9 +86,10 @@ import java.util.Map;
  * <p>
  * Supports a single image at the container root, or a {@code bioformats2raw}
  * container whose images are integer-named child groups ({@code 0, 1, …}),
- * discovered by probing. Each image needs axes {@code (z,y,x)} plus optional
- * {@code c} and {@code t}. HCS plates, labels and 2D-only data are out of scope
- * for now (see {@code PLAN.md}).
+ * discovered by probing. Each image needs axes {@code (y,x)}, optionally
+ * {@code z}, plus optional {@code c} and {@code t}; a 2D image (no {@code z}) is
+ * presented as a single-slice volume, since BigDataViewer sources are 3D. HCS
+ * plates and labels are out of scope for now (see {@code PLAN.md}).
  */
 public class OmeZarrOpener {
 
@@ -113,7 +115,7 @@ public class OmeZarrOpener {
 		final Parsed p = parse(uri);
 		final SequenceDescription seq =
 				new SequenceDescription(new TimePoints(p.timePoints), p.setups, null, p.missingViews);
-		final OmeZarrImageLoader loader = new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.higher);
+		final OmeZarrImageLoader loader = new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices);
 		seq.setImgLoader(loader);
 		return new SpimData(new File("."), seq, new ViewRegistrations(p.registrations));
 	}
@@ -134,7 +136,7 @@ public class OmeZarrOpener {
 			final AbstractSequenceDescription<?, ?, ?> seq) {
 		final URI uri = toUri(uriString);
 		final Parsed p = parse(uri);
-		return new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.higher);
+		return new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices);
 	}
 
 	/** Everything discovery/parsing yields, shared by {@link #open} and {@link #openLoader}. */
@@ -145,7 +147,7 @@ public class OmeZarrOpener {
 		List<TimePoint> timePoints;
 		MissingViews missingViews;
 		OmeZarrN5Properties props;
-		Map<ViewId, int[]> higher;
+		Map<ViewId, HyperSlice> hyperSlices;
 	}
 
 	/**
@@ -198,14 +200,15 @@ public class OmeZarrOpener {
 		final List<ViewSetup> setups = new ArrayList<>();
 		final List<ViewRegistration> registrations = new ArrayList<>();
 		final List<ViewId> missing = new ArrayList<>();
-		final Map<ViewId, ImageEntry> byView = new HashMap<>();   // dataset paths + mipmaps
-		final Map<Integer, ImageEntry> bySetup = new HashMap<>(); // same, per setup
-		final Map<ViewId, int[]> higher = new HashMap<>();        // c/t hyperslice indices
+		final Map<ViewId, ImageEntry> byView = new HashMap<>();      // dataset paths + mipmaps
+		final Map<Integer, ImageEntry> bySetup = new HashMap<>();    // same, per setup
+		final Map<ViewId, HyperSlice> hyperSlices = new HashMap<>(); // nD array → 3D view
 
 		int setupId = 0;
 		for (int s = 0; s < images.size(); s++) {
 			final ImageInfo img = images.get(s);
-			final ImageEntry entry = new ImageEntry(img.levelPaths, img.mipmapResolutions);
+			final ImageEntry entry = new ImageEntry(
+					img.levelPaths, img.mipmapResolutions, img.dimX, img.dimY, img.dimZ);
 			for (int c = 0; c < img.sizeC; c++) {
 				final OmeroChannel oc = (img.omero != null && img.omero.channels != null
 						&& c < img.omero.channels.length) ? img.omero.channels[c] : null;
@@ -245,7 +248,7 @@ public class OmeZarrOpener {
 					final ViewId viewId = new ViewId(t, setupId);
 					if (t < img.sizeT) {
 						byView.put(viewId, entry);
-						higher.put(viewId, higherDimensionIndices(img.dimC, img.dimT, c, t));
+						hyperSlices.put(viewId, hyperSlice(img, c, t));
 						registrations.add(new ViewRegistration(t, setupId, img.calibration));
 					} else {
 						missing.add(viewId); // this image has fewer timepoints than the union
@@ -268,7 +271,7 @@ public class OmeZarrOpener {
 		parsed.timePoints = timePointList;
 		parsed.missingViews = missing.isEmpty() ? null : new MissingViews(missing);
 		parsed.props = new OmeZarrN5Properties(byView, bySetup);
-		parsed.higher = higher;
+		parsed.hyperSlices = hyperSlices;
 		return parsed;
 	}
 
@@ -341,9 +344,9 @@ public class OmeZarrOpener {
 				else if ("z".equalsIgnoreCase(name)) { dimZ = dim; }
 			}
 		}
-		if (dimX < 0 || dimY < 0 || dimZ < 0) {
+		if (dimX < 0 || dimY < 0) {
 			throw new IllegalArgumentException(
-					"Image at " + path + " lacks 3 spatial axes (z, y, x); 2D-only OME-Zarr is not yet supported.");
+					"Image at " + path + " lacks the x and y spatial axes.");
 		}
 
 		final String level0Path = path + "/" + ms.datasets[0].path;
@@ -351,21 +354,26 @@ public class OmeZarrOpener {
 
 		final ImageInfo info = new ImageInfo();
 		info.path = path;
+		info.dimX = dimX;
+		info.dimY = dimY;
+		info.dimZ = dimZ;
 		info.dimC = dimC;
 		info.dimT = dimT;
 		info.sizeC = dimC >= 0 ? (int) dims[dimC] : 1;
 		info.sizeT = dimT >= 0 ? (int) dims[dimT] : 1;
-		info.size = new FinalDimensions(dims[dimX], dims[dimY], dims[dimZ]);
+		// BDV sources are 3D, so a 2D image (no z axis) becomes a single z slice.
+		info.size = new FinalDimensions(dims[dimX], dims[dimY], dimZ >= 0 ? dims[dimZ] : 1);
 
 		// scale/translation come back in imglib2 dim order (see note in class doc).
+		// Without a z axis there is nothing to calibrate along z: keep it identity.
 		final double[] scale = level0Transform(ms.datasets[0], true);
 		final double[] trans = level0Transform(ms.datasets[0], false);
 		final double sx = scale != null ? scale[dimX] : 1.0;
 		final double sy = scale != null ? scale[dimY] : 1.0;
-		final double sz = scale != null ? scale[dimZ] : 1.0;
+		final double sz = (scale != null && dimZ >= 0) ? scale[dimZ] : 1.0;
 		final double tx = trans != null ? trans[dimX] : 0.0;
 		final double ty = trans != null ? trans[dimY] : 0.0;
-		final double tz = trans != null ? trans[dimZ] : 0.0;
+		final double tz = (trans != null && dimZ >= 0) ? trans[dimZ] : 0.0;
 
 		final String unit = axes[posX].getUnit() != null ? axes[posX].getUnit() : "pixel";
 		info.voxel = new FinalVoxelDimensions(unit, sx, sy, sz);
@@ -384,8 +392,9 @@ public class OmeZarrOpener {
 			info.levelPaths[l] = path + "/" + ms.datasets[l].path;
 			final double[] scaleL = level0Transform(ms.datasets[l], true);
 			for (int k = 0; k < 3; k++) {
+				// A 2D image (d < 0 for z) only downsamples in x/y: keep z at 1.
 				final int d = spatialDims[k];
-				final double r = (scaleL != null && scale != null && scale[d] != 0.0)
+				final double r = (d >= 0 && scaleL != null && scale != null && scale[d] != 0.0)
 						? scaleL[d] / scale[d] : 1.0;
 				info.mipmapResolutions[l][k] = Math.round(r * 10000) / 10000d;
 			}
@@ -393,15 +402,17 @@ public class OmeZarrOpener {
 
 		info.omero = readOmero(n5, path);
 
-		log.info("  image {}: {} channel(s), {} timepoint(s), {} level(s), voxel [{}, {}, {}] {}",
-				path, info.sizeC, info.sizeT, nLevels, sx, sy, sz, unit);
+		log.info("  image {}: {}, {} channel(s), {} timepoint(s), {} level(s), voxel [{}, {}, {}] {}",
+				path, dimZ >= 0 ? "3D" : "2D (single z slice)",
+				info.sizeC, info.sizeT, nLevels, sx, sy, sz, unit);
 		return info;
 	}
 
 	/** Per-image parsed metadata used to assemble the SpimData. */
 	private static class ImageInfo {
 		String path;
-		int dimC, dimT;
+		/** imglib2 dim of each axis, or -1 when the image has no such axis. */
+		int dimX, dimY, dimZ, dimC, dimT;
 		int sizeC, sizeT;
 		FinalDimensions size;
 		VoxelDimensions voxel;
@@ -412,17 +423,25 @@ public class OmeZarrOpener {
 	}
 
 	/**
-	 * @param dimC imglib2 dim of the channel axis, or -1
-	 * @param dimT imglib2 dim of the time axis, or -1
-	 * @return the c/t hyperslice indices for {@link OmeZarrImageLoader}, in
-	 *         ascending imglib2-dim order: {@code [c]}, {@code [t]}, {@code [c,t]}
-	 *         or {@code null} for a pure 3D volume.
+	 * Describes, for {@link OmeZarrImageLoader}, how to reduce {@code img}'s stored
+	 * array to the 3D view of channel {@code c} at timepoint {@code t}: the c/t axes
+	 * are pinned at their imglib2 dimensions (which depend on the image's axes), and
+	 * a 2D image additionally gets a singleton z appended.
 	 */
-	private static int[] higherDimensionIndices(final int dimC, final int dimT, final int c, final int t) {
-		if (dimC >= 0 && dimT >= 0) return new int[] { c, t }; // dims 3 (c) and 4 (t)
-		if (dimC >= 0) return new int[] { c };                 // dim 3 = c
-		if (dimT >= 0) return new int[] { t };                 // dim 3 = t
-		return null;                                            // pure 3D
+	private static HyperSlice hyperSlice(final ImageInfo img, final int c, final int t) {
+		final int n = (img.dimC >= 0 ? 1 : 0) + (img.dimT >= 0 ? 1 : 0);
+		final int[] dims = new int[n];
+		final long[] indices = new long[n];
+		int i = 0;
+		if (img.dimC >= 0) { dims[i] = img.dimC; indices[i] = c; i++; }
+		if (img.dimT >= 0) { dims[i] = img.dimT; indices[i] = t; i++; }
+		// NGFF's axis order puts t outside c, so c already comes first in imglib2
+		// order; sort defensively, since the loader slices from the highest dim down.
+		if (n == 2 && dims[0] > dims[1]) {
+			final int d = dims[0]; dims[0] = dims[1]; dims[1] = d;
+			final long x = indices[0]; indices[0] = indices[1]; indices[1] = x;
+		}
+		return new HyperSlice(dims, indices, img.dimZ < 0);
 	}
 
 	/** Extracts the level-0 scale (or translation) vector, in NGFF axes order. */

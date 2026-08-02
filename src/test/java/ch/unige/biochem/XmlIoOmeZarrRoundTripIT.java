@@ -10,10 +10,10 @@
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
+ * 
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *
+ * 
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -62,12 +62,30 @@ public class XmlIoOmeZarrRoundTripIT {
 	private static final String V04_6001240 =
 			"https://livingobjects.ebi.ac.uk/idr/zarr/v0.4/idr0062A/6001240.zarr";
 
+	/** v0.4 / Zarr-v2, 50 channels, 2D (axes {@code c,y,x}). */
+	private static final String V04_2D_MULTICHANNEL =
+			"https://livingobjects.ebi.ac.uk/idr/zarr/v0.4/idr0076A/10501752.zarr";
+
 	@Rule
 	public final TemporaryFolder tmp = new TemporaryFolder();
 
 	@Test
 	public void saveReloadReopens() throws Exception {
-		final SpimData original = (SpimData) openOrSkip(V04_6001240);
+		saveReloadReopens(V04_6001240, 236);
+	}
+
+	/**
+	 * A 2D image must survive the round trip as well: the reloaded loader re-runs
+	 * discovery, so it has to rebuild the singleton z from the NGFF axes and still
+	 * serve a single-slice 3D view.
+	 */
+	@Test
+	public void saveReloadReopens_2d() throws Exception {
+		saveReloadReopens(V04_2D_MULTICHANNEL, 1);
+	}
+
+	private void saveReloadReopens(final String url, final long expectedSizeZ) throws Exception {
+		final SpimData original = (SpimData) openOrSkip(url);
 
 		// --- save to XML ---
 		final File xml = new File(tmp.getRoot(), "omezarr-roundtrip.xml");
@@ -92,6 +110,7 @@ public class XmlIoOmeZarrRoundTripIT {
 			final ViewSetup a = before.get(i);
 			final ViewSetup b = after.get(i);
 			assertEquals("name[" + i + "]", a.getName(), b.getName());
+			assertEquals("sizeZ[" + i + "]", expectedSizeZ, b.getSize().dimension(2));
 			for (int d = 0; d < 3; d++) {
 				assertEquals("size[" + i + "][" + d + "]", a.getSize().dimension(d), b.getSize().dimension(d));
 				assertEquals("voxel[" + i + "][" + d + "]",
@@ -117,6 +136,10 @@ public class XmlIoOmeZarrRoundTripIT {
 			return;
 		}
 		assertEquals("reloaded view is 3D", 3, img.numDimensions());
+		if (expectedSizeZ == 1) {
+			// A 2D image keeps its singleton z at every level (z is never downsampled).
+			assertEquals("reloaded 2D view keeps its singleton z", 0, img.max(2));
+		}
 		final net.imglib2.RandomAccess<?> ra = img.randomAccess();
 		final long[] c = new long[3];
 		for (int d = 0; d < 3; d++) c[d] = (img.min(d) + img.max(d)) / 2;

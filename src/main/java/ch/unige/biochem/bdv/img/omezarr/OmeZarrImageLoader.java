@@ -41,35 +41,59 @@ import java.util.Map;
 /**
  * {@code N5ImageLoader} specialised for OME-Zarr: it inherits the multiresolution
  * + volatile-cache machinery of {@link N5ImageLoader}, uses an
- * {@link OmeZarrN5Properties} for the OME-NGFF layout, and hyperslices each
- * {@code (setup, timepoint)} out of the channel/time axes.
+ * {@link OmeZarrN5Properties} for the OME-NGFF layout, and reduces the stored
+ * {@code nD} array to the 3D view of a single {@code (setup, timepoint)}.
  * <p>
- * NGFF stores {@code (t,c,z,y,x)}; n5/imglib2 reverses to {@code (x,y,z,c,t)}, so
- * the first three dimensions are spatial and any extra dimensions ({@code c} at 3,
- * {@code t} at 4) are sliced away. This requires 3 spatial axes; 2D-only OME-Zarr
- * is not yet supported (see {@code PLAN.md}).
+ * NGFF stores its axes in the order {@code (t,c,z,y,x)} and n5/imglib2 reverses
+ * them, so a 3D image maps to {@code (x,y,z,c,t)} and a 2D one — which has no
+ * {@code z} axis at all — to {@code (x,y,c,t)}. Which imglib2 dimension is which
+ * is therefore image-dependent, and is described per view by a {@link HyperSlice}
+ * precomputed by {@link OmeZarrOpener}: it fixes the {@code c}/{@code t} axes at
+ * that view's indices and, for a 2D image, appends a singleton {@code z} so the
+ * result is the single-slice volume BigDataViewer expects.
  */
 public class OmeZarrImageLoader extends N5ImageLoader {
 
+	/**
+	 * How to reduce one stored {@code nD} array to the 3D {@code (x,y,z)} view of a
+	 * single {@code (setup, timepoint)}: hyperslice the non-spatial axes at fixed
+	 * indices, then append a singleton {@code z} if the image has no {@code z} axis.
+	 */
+	public static final class HyperSlice {
+
+		/** imglib2 dimensions to slice away (the c and/or t axes), ascending. */
+		final int[] dims;
+
+		/** the index each of {@link #dims} is fixed at. */
+		final long[] indices;
+
+		/** whether to append a singleton z, i.e. whether the image is 2D. */
+		final boolean appendZ;
+
+		public HyperSlice(final int[] dims, final long[] indices, final boolean appendZ) {
+			this.dims = dims;
+			this.indices = indices;
+			this.appendZ = appendZ;
+		}
+	}
+
 	private final N5Properties properties;
-	private final Map<ViewId, int[]> higherDimensionIndices;
+	private final Map<ViewId, HyperSlice> hyperSlices;
 
 	/**
-	 * @param reader   an already-opened reader on the container.
-	 * @param uri      the container URI.
-	 * @param seq      the sequence description.
-	 * @param props    the OME-Zarr metadata/path resolver.
-	 * @param higher   per-{@code (timepoint,setup)} indices of the c/t hyperslice
-	 *                 to extract, in ascending imglib2-dimension order (e.g.
-	 *                 {@code [c]}, {@code [t]} or {@code [c,t]}); {@code null} for
-	 *                 a pure 3D volume.
+	 * @param reader      an already-opened reader on the container.
+	 * @param uri         the container URI.
+	 * @param seq         the sequence description.
+	 * @param props       the OME-Zarr metadata/path resolver.
+	 * @param hyperSlices per-{@code (timepoint,setup)} description of the reduction
+	 *                    from the stored array down to a 3D view.
 	 */
 	public OmeZarrImageLoader(final N5Reader reader, final URI uri,
 			final AbstractSequenceDescription<?, ?, ?> seq,
-			final N5Properties props, final Map<ViewId, int[]> higher) {
+			final N5Properties props, final Map<ViewId, HyperSlice> hyperSlices) {
 		super(reader, uri, seq);
 		this.properties = props;
-		this.higherDimensionIndices = higher;
+		this.hyperSlices = hyperSlices;
 	}
 
 	@Override
@@ -83,30 +107,31 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 			final int level, final CacheHints cacheHints, final T type) {
 		final RandomAccessibleInterval<T> full =
 				super.prepareCachedImage(datasetPath, setupId, timepointId, level, cacheHints, type);
-		return extract3D(full, higherDimensionIndices.get(new ViewId(timepointId, setupId)));
+		return extract3D(full, hyperSlices.get(new ViewId(timepointId, setupId)));
 	}
 
 	/**
-	 * Reduces an {@code nD} volume ({@code n > 3}) to its 3D {@code (x,y,z)} core
-	 * by hyperslicing the higher dimensions at the given indices. Slices from the
-	 * highest dimension down so indices stay valid.
+	 * Reduces a stored {@code nD} volume to the 3D {@code (x,y,z)} view described by
+	 * {@code hs}: hyperslices the c/t dimensions — from the highest down, so the
+	 * remaining dimension indices stay valid — and appends a singleton {@code z} for
+	 * a 2D image, yielding a {@code z} extent of exactly {@code [0,0]}.
+	 *
+	 * @param hs the reduction to apply, or {@code null} for an unmapped view, in
+	 *           which case any dimension beyond the third is dropped at its minimum
+	 *           (only correct when those are singletons).
 	 */
 	static <T> RandomAccessibleInterval<T> extract3D(final RandomAccessibleInterval<T> volume,
-			final int[] higher) {
-		if (volume.numDimensions() <= 3) {
-			return volume;
-		}
+			final HyperSlice hs) {
 		RandomAccessibleInterval<T> out = volume;
-		if (higher == null || higher.length == 0) {
-			// No indices given: only valid when the higher dimensions are singletons.
+		if (hs == null) {
 			for (int d = out.numDimensions() - 1; d >= 3; d--) {
 				out = Views.hyperSlice(out, d, out.min(d));
 			}
 			return out;
 		}
-		for (int d = 3 + higher.length - 1; d >= 3; d--) {
-			out = Views.hyperSlice(out, d, higher[d - 3]);
+		for (int i = hs.dims.length - 1; i >= 0; i--) {
+			out = Views.hyperSlice(out, hs.dims[i], hs.indices[i]);
 		}
-		return out;
+		return hs.appendZ ? Views.addDimension(out, 0, 0) : out;
 	}
 }

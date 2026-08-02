@@ -13,9 +13,12 @@ so that BDV-Playground's existing entity/tree/export machinery keeps working.
 - **The owned loader = two small classes:**
   - `OmeZarrImageLoader extends bdv.img.n5.N5ImageLoader` — inherits
     multiresolution + volatile cache; overrides `createN5PropertiesInstance()` and
-    `prepareCachedImage()` to hyperslice `c`/`t` down to 3D (`extract3D`).
+    `prepareCachedImage()` to reduce the stored nD array to 3D (`extract3D`),
+    driven by a per-view `HyperSlice` (which `c`/`t` dims to pin, and whether to
+    append a singleton `z` for a 2D image).
   - `OmeZarrN5Properties implements bdv.img.n5.N5Properties` — resolves per-level
-    dataset paths, dimensions (`copyOf(dims,3)`), data type and mipmap resolutions
+    dataset paths, dimensions (via the recorded imglib2 dim of each spatial axis,
+    with `z = 1` when the image has none), data type and mipmap resolutions
     from precomputed OME-NGFF metadata.
 - **The metadata layer (`OmeZarrOpener`)** builds the `SequenceDescription`
   (`ViewSetup`s with calibration + `Channel`, `TimePoints`), `ViewRegistrations`
@@ -32,8 +35,10 @@ Pinned by pom-scijava 45.1.0: bigdataviewer-core 10.6.11, n5-universe 3.0.2.
 - Axis order: NGFF stores `(t,c,z,y,x)`; n5/imglib2 reverses to `(x,y,z,c,t)` →
   imglib2 dim `0,1,2 = x,y,z`, `3 = c`, `4 = t`. `scale`/`translation` come back in
   imglib2 order (indexed by dim); `axes[]` stays in NGFF order (unit by position).
-  Requires **3 spatial axes (z,y,x)**; the hyperslice index is `[c]`, `[t]`, or
-  `[c,t]` (ascending imglib2 dim), `null` for pure 3D.
+  **Which dim is which is image-dependent**: an image without a `z` axis is
+  `(x,y,c,t)`, so `c`/`t` shift down. `parseImage` records the imglib2 dim of every
+  axis (`-1` when absent) and everything downstream is driven by that mapping
+  rather than by fixed dim indices.
 
 ## v0.1 scope (agreed)
 
@@ -44,7 +49,7 @@ container (image at the container root).
 
 **Out (later milestones):** `omero` channel names/colors/contrast; HCS
 plate/well; `labels`; RFC-5 rich transforms; multi-image / `bioformats2raw`
-series discovery; 2D-only (no z axis) OME-Zarr; writing/export.
+series discovery; writing/export.
 
 ## Components
 
@@ -76,12 +81,27 @@ series discovery; 2D-only (no z axis) OME-Zarr; writing/export.
   container with a 79-timepoint timelapse): correct metadata plus a real block
   load. `mvn clean install` passes with the license check enabled.
   - Runtime needs the native `blosc` lib (`-Djna.library.path=...`); Fiji ships it.
-- [x] **Regression tests** (`OmeZarrOpenerIT`) against five pinned, immutable IDR
+- [x] **2D-only OME-Zarr** (no `z` axis) — opened as a **single-slice volume**
+  (`z` size 1), since BDV sources are inherently 3D. The whole axis layout is now
+  mapping-driven instead of assuming `x,y,z,c,t`: `parseImage` records the imglib2
+  dim of each axis, `OmeZarrN5Properties.getDimensions` reads `x`/`y`/`z` through it
+  (reporting `z = 1` when absent), and the loader's per-view `HyperSlice` pins the
+  `c`/`t` dims wherever they actually are, then appends a singleton `z`. Voxel depth
+  and the `z` calibration stay at identity, and `z` is never downsampled, so the
+  mipmap resolutions agree with the singleton dimension. This also unblocks the
+  majority of IDR HCS plates, which are 2D.
+
+- [x] **Regression tests** (`OmeZarrOpenerIT`) against eight pinned, immutable IDR
   datasets from the [NGFF sample catalog](https://idr.github.io/ome-ngff-samples/):
   golden assertions on format detection, channel/timepoint counts, voxel
   size + unit, omero colors/contrast, bioformats2raw series discovery, and the
   `translation` → `ViewRegistration` path. Includes a v0.4-vs-v0.5 parity test on
-  the same image and a pixel-load test proving c/t hyperslicing to 3D.
+  the same image and a pixel-load test proving c/t hyperslicing to 3D. Three of the
+  datasets are 2D (`XY`, `XYC`, and a 2D bioformats2raw container of 9 series),
+  covering the singleton-z path end to end. `ExtractTo3DTest` additionally unit-tests
+  the reduction offline over every `z?/c?/t?` permutation — including `2D + t` and
+  `2D + c + t`, for which the catalog has no non-HCS dataset — checking both the
+  resulting interval and that the correct `(c,t)` plane was selected.
   - **Opt-in** (network + native): `mvn test -Dtest=OmeZarrOpenerIT
     -Domezarr.integration=true -Djna.library.path=<dir with blosc>`. Each test
     self-skips (never fails) when the flag is off, the IDR host is unreachable, or
@@ -103,7 +123,7 @@ series discovery; 2D-only (no z axis) OME-Zarr; writing/export.
 - [ ] Register sources into BDV-Playground's `SourceService`/`SourceTree` (so the
   attached `Displaysettings` actually colors the sources) — needs a
   bdv-playground (test-scope) dependency.
-- [ ] 2D and HCS support (both require extending the owned loader — see the 2D
-  assessment: singleton-z in `extract3D` + the properties' dimension handling).
+- [ ] HCS plate/well support (plate → wells → fields discovery on top of the
+  existing image parsing; most IDR plates are 2D, which is now handled).
 - [ ] Cache: reuse Playground's global cache (the loader's
   `VolatileGlobalCellCache` is the injection point).
