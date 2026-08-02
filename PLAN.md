@@ -76,15 +76,28 @@ series discovery; 2D-only (no z axis) OME-Zarr; writing/export.
   container with a 79-timepoint timelapse): correct metadata plus a real block
   load. `mvn clean install` passes with the license check enabled.
   - Runtime needs the native `blosc` lib (`-Djna.library.path=...`); Fiji ships it.
+- [x] **Regression tests** (`OmeZarrOpenerIT`) against five pinned, immutable IDR
+  datasets from the [NGFF sample catalog](https://idr.github.io/ome-ngff-samples/):
+  golden assertions on format detection, channel/timepoint counts, voxel
+  size + unit, omero colors/contrast, bioformats2raw series discovery, and the
+  `translation` → `ViewRegistration` path. Includes a v0.4-vs-v0.5 parity test on
+  the same image and a pixel-load test proving c/t hyperslicing to 3D.
+  - **Opt-in** (network + native): `mvn test -Dtest=OmeZarrOpenerIT
+    -Domezarr.integration=true -Djna.library.path=<dir with blosc>`. Each test
+    self-skips (never fails) when the flag is off, the IDR host is unreachable, or
+    native blosc is missing, so the default build stays green offline.
+
+- [x] **XML round-trip (`XmlIo`)** — `XmlIoOmeZarrImageLoader`
+  (`@ImgLoaderIo(format = "bdv.omezarr")`) saves/reloads an OME-Zarr-backed
+  SpimData as a BDV XML (BigStitcher/BigWarp interop). It persists only the
+  container URI and re-runs discovery on load via `OmeZarrOpener.openLoader`
+  (like `XmlIoN5ImageLoader` re-opens its store), rather than persisting the whole
+  view→entry map. Covered by `XmlIoOmeZarrRoundTripIT` (open → save → reload →
+  pixel load). The URI is stored verbatim (not relativized), so remote/S3
+  containers round-trip; local containers are stored as absolute URIs.
 
 ## Next
 
-- [ ] **XML round-trip (`XmlIo`)** — the owned `OmeZarrImageLoader` has no
-  `@ImgLoaderIo XmlIoBasicImgLoader`, so a SpimData with it does not save/reload
-  as a BDV XML (blocks BigStitcher/BigWarp interop and the ABBA/Warpy-style
-  workflows). Cleanest design: serialize only `{uri, format}` in the XML and
-  re-run discovery on load (like `XmlIoN5ImageLoader` re-opens its store), rather
-  than persisting the whole view→entry map.
 - [ ] **Interactive** BDV display check (`OpenOmeZarrDemo.main` with a UI; note
   `BdvFunctions.show` won't apply `Displaysettings` — BDV-Playground does).
 - [ ] Register sources into BDV-Playground's `SourceService`/`SourceTree` (so the

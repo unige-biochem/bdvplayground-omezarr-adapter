@@ -29,6 +29,7 @@ import ch.unige.biochem.bdv.img.omezarr.OmeZarrN5Properties.ImageEntry;
 import com.google.gson.GsonBuilder;
 import mpicbg.spim.data.SpimData;
 import mpicbg.spim.data.generic.AbstractSpimData;
+import mpicbg.spim.data.generic.sequence.AbstractSequenceDescription;
 import mpicbg.spim.data.registration.ViewRegistration;
 import mpicbg.spim.data.registration.ViewRegistrations;
 import mpicbg.spim.data.sequence.Angle;
@@ -109,6 +110,50 @@ public class OmeZarrOpener {
 	 */
 	public static AbstractSpimData<?> open(final String uriString) {
 		final URI uri = toUri(uriString);
+		final Parsed p = parse(uri);
+		final SequenceDescription seq =
+				new SequenceDescription(new TimePoints(p.timePoints), p.setups, null, p.missingViews);
+		final OmeZarrImageLoader loader = new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.higher);
+		seq.setImgLoader(loader);
+		return new SpimData(new File("."), seq, new ViewRegistrations(p.registrations));
+	}
+
+	/**
+	 * Rebuilds only the {@link OmeZarrImageLoader} for an already-restored
+	 * {@link AbstractSequenceDescription}. Used by the XML deserializer
+	 * ({@link XmlIoOmeZarrImageLoader}): the BDV XML restores the sequence
+	 * description (setups, registrations, timepoints), and this re-runs OME-NGFF
+	 * discovery to reconstruct the pixel loader. Discovery is deterministic, so the
+	 * per-view path / hyperslice metadata lines up with the setup and timepoint ids
+	 * in {@code seq} as long as the container is unchanged.
+	 *
+	 * @param uriString the container URI stored in the XML.
+	 * @param seq       the sequence description restored from the XML.
+	 */
+	public static OmeZarrImageLoader openLoader(final String uriString,
+			final AbstractSequenceDescription<?, ?, ?> seq) {
+		final URI uri = toUri(uriString);
+		final Parsed p = parse(uri);
+		return new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.higher);
+	}
+
+	/** Everything discovery/parsing yields, shared by {@link #open} and {@link #openLoader}. */
+	private static final class Parsed {
+		N5Reader n5;
+		List<ViewSetup> setups;
+		List<ViewRegistration> registrations;
+		List<TimePoint> timePoints;
+		MissingViews missingViews;
+		OmeZarrN5Properties props;
+		Map<ViewId, int[]> higher;
+	}
+
+	/**
+	 * Detects the storage format, discovers the image group(s) and parses each
+	 * image into the {@link ViewSetup}s / {@link ViewRegistration}s and the
+	 * per-view path / hyperslice maps the loader consumes.
+	 */
+	private static Parsed parse(final URI uri) {
 
 		// --- 1. Detect the storage format ------------------------------------
 		// OME-NGFF v0.5 is Zarr v3 (StorageFormat.ZARR); v0.4 is Zarr v2 (ZARR2).
@@ -210,19 +255,21 @@ public class OmeZarrOpener {
 			}
 		}
 
-		// --- 5. Assemble the SpimData ----------------------------------------
+		// --- 5. Collect timepoints + missing views ---------------------------
 		final List<TimePoint> timePointList = new ArrayList<>();
 		for (int t = 0; t < globalMaxT; t++) {
 			timePointList.add(new TimePoint(t));
 		}
-		final MissingViews missingViews = missing.isEmpty() ? null : new MissingViews(missing);
-		final SequenceDescription seq =
-				new SequenceDescription(new TimePoints(timePointList), setups, null, missingViews);
-		final OmeZarrN5Properties props = new OmeZarrN5Properties(byView, bySetup);
-		final OmeZarrImageLoader loader = new OmeZarrImageLoader(n5, uri, seq, props, higher);
-		seq.setImgLoader(loader);
 
-		return new SpimData(new File("."), seq, new ViewRegistrations(registrations));
+		final Parsed parsed = new Parsed();
+		parsed.n5 = n5;
+		parsed.setups = setups;
+		parsed.registrations = registrations;
+		parsed.timePoints = timePointList;
+		parsed.missingViews = missing.isEmpty() ? null : new MissingViews(missing);
+		parsed.props = new OmeZarrN5Properties(byView, bySetup);
+		parsed.higher = higher;
+		return parsed;
 	}
 
 	/**

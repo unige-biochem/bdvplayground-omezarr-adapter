@@ -45,12 +45,21 @@ it downstream to color the sources.
 Both v0.4 (Zarr v2) and v0.5 (Zarr v3) are auto-detected. Remote URLs
 (`https://…`, S3) and local paths are accepted.
 
+## BigDataViewer XML round-trip
+
+The resulting `SpimData` saves to and reloads from a BigDataViewer XML
+(`XmlIoSpimData`), so it interoperates with BigStitcher / BigWarp. Only the
+container URI is written to the XML; the OME-NGFF layout is re-discovered on load.
+The URI is stored verbatim (not relativized), so remote/S3 containers round-trip;
+local containers are stored as absolute URIs. The pixel data itself is **not**
+exported — the XML always points back at the original OME-Zarr.
+
 ### Not yet supported
 
 - HCS plates / wells
 - `labels` (segmentation) groups
 - 2D-only OME-Zarr (an image must have `z`, `y`, `x` spatial axes)
-- Writing / export
+- Writing / export of pixel data (OME-Zarr is read-only; only the BDV XML is written)
 - Coordinate transformations beyond `scale` + `translation`
 
 See [`PLAN.md`](PLAN.md) for the roadmap.
