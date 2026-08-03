@@ -112,6 +112,43 @@ instance profile, …).
 Most non-Amazon stores serve **path-style** addressing (`endpoint/bucket/key`),
 which is the default; turn it off for virtual-host style (`bucket.endpoint/key`).
 
+## World coordinate units
+
+OME-NGFF states its own unit per spatial axis, and by default the dataset keeps
+it. Both Fiji commands offer a **World coordinate units** choice — the same one
+BigDataViewer-Playground's Bio-Formats importer offers, with the same
+`MILLIMETER` default — which converts the voxel sizes *and* the pixel → physical
+registrations into a common unit, so an OME-Zarr lands in the same world space as
+a dataset opened by another importer.
+
+| Choice | Effect |
+| --- | --- |
+| `MILLIMETER` / `MICROMETER` / `NANOMETER` | Rescales the calibration into that unit. |
+| `PIXEL` | Drops the physical calibration: voxel size `1,1,1`, identity registration. Anisotropy goes with it. |
+| `BIGSTITCHER COMPATIBLE` | Rescales so one pixel along `x` measures 1, keeping the `z/x` anisotropy in the model, and drops the `Displaysettings` entities. |
+
+That last step is needed because BigStitcher will not fuse tiles whose entities
+differ, even for an entity that has nothing to do with the grouping — and
+`Displaysettings` differs per setup by construction, since it carries that
+channel's own color and contrast. `Plate`, `Well` and `Field` are kept, as the
+Bio-Formats importer keeps them.
+
+When scripting, the default is `WorldUnit.AS_STORED` — `OmeZarrOpener.open(uri)`
+keeps the file's own unit, which is the only lossless choice:
+
+```java
+AbstractSpimData<?> inMillimeters = OmeZarrOpener.open(
+        "https://uk1s3.embassy.ebi.ac.uk/idr/zarr/v0.4/idr0062A/6001240.zarr",
+        null, null, WorldUnit.MILLIMETER);
+```
+
+The image size is a pixel count and never follows the unit. An image whose axes
+declare no length unit cannot be placed in a metric world; rather than inventing
+a calibration, it is left exactly as stored and a warning is logged.
+
+The normalisation factor for `BIGSTITCHER COMPATIBLE` is taken from the **first**
+image, so a multi-image container or an HCS plate stays internally consistent.
+
 ## BigDataViewer XML round-trip
 
 The resulting `SpimData` saves to and reloads from a BigDataViewer XML
