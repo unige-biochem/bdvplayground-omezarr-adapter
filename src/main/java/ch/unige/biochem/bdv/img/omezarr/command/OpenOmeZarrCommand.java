@@ -26,6 +26,7 @@
 package ch.unige.biochem.bdv.img.omezarr.command;
 
 import ch.unige.biochem.bdv.img.omezarr.OmeZarrOpener;
+import ch.unige.biochem.bdv.img.omezarr.WorldUnit;
 import mpicbg.spim.data.generic.AbstractSpimData;
 import org.scijava.ItemIO;
 import org.scijava.command.Command;
@@ -53,11 +54,17 @@ public class OpenOmeZarrCommand implements Command {
 					+ "whose root holds a multiscale image or an HCS plate.")
 	String url;
 
+	@Parameter(required = false,
+			label = "World coordinate units",
+			description = "Unit for the coordinate system where images will be positioned.",
+			choices = { "MILLIMETER", "MICROMETER", "NANOMETER", "PIXEL", "BIGSTITCHER COMPATIBLE" })
+	public String unit = "MILLIMETER";
+
 	@Parameter(type = ItemIO.OUTPUT)
 	AbstractSpimData<?> spimData;
 
 	@Override
 	public void run() {
-		spimData = OmeZarrOpener.open(url);
+		spimData = OmeZarrOpener.open(url, null, null, WorldUnit.fromChoice(unit));
 	}
 }

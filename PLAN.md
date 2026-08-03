@@ -60,6 +60,7 @@ series discovery; writing/export.
 | `bdv/img/omezarr/command/OpenOmeZarrS3Command.java` | SciJava `Command`: `s3://` URI + endpoint + optional credentials. |
 | `bdv/img/omezarr/S3Options.java` | S3 endpoint / region / addressing style / credentials, applied via `N5Factory.s3Configuration`. |
 | `bdv/img/omezarr/HcsOptions.java` | How much of an HCS plate to open (well / field caps) and how carefully (uniform fields vs per-field metadata). |
+| `bdv/img/omezarr/WorldUnit.java` | Target unit of the world coordinate system, plus the `PIXEL` and `BIGSTITCHER COMPATIBLE` presets. |
 | `SpimDataPostprocessor` (already present, test) | Auto-shows any `AbstractSpimData` command output in BDV. |
 | `OpenOmeZarrDemo` (test) | Smoke test against a public OME-Zarr. |
 
@@ -177,6 +178,42 @@ series discovery; writing/export.
     XML round-trip proving `Plate`/`Well`/`Field` and the caps survive, and a pixel
     load of a field that was *not* the template. Same opt-in gating as
     `OmeZarrOpenerIT`; the whole class runs in ~30 s.
+
+- [x] **World coordinate units** (`WorldUnit`) — both importers now carry the same
+  "World coordinate units" choice as BDV-Playground's Bio-Formats command
+  (`MILLIMETER` default, plus `MICROMETER`, `NANOMETER`, `PIXEL` and
+  `BIGSTITCHER COMPATIBLE`), so an OME-Zarr lands in the same world space as a
+  dataset opened by another importer. The conversion rescales the voxel size *and*
+  the registration; the image size is a pixel count and never follows it.
+  - Applied once per container (`applyWorldUnit`), after every image is parsed, so
+    a multi-image container or a plate is converted by one common factor and its
+    images stay in the same world space. Both the `VoxelDimensions` and the
+    `AffineTransform3D` are rebuilt rather than mutated — the HCS fast path shares
+    one voxel-dimensions instance across a whole plate.
+  - `PIXEL` drops the calibration (voxel `1,1,1`, identity model), mirroring what
+    the Bio-Formats opener does when the target unit is not convertible.
+  - `BIGSTITCHER COMPATIBLE` normalises by the **first** image's `x` voxel size so
+    one pixel in `x` measures 1 while `z/x` anisotropy stays in the model, then
+    drops `Displaysettings`. The reason for that last step: BigStitcher will not
+    fuse tiles whose entities differ, even for an entity that has nothing to do
+    with the grouping — and `Displaysettings` differs per setup by construction,
+    since it carries that channel's own color and contrast. Doing the
+    normalisation at construction rather than through `SpimDataHelper.scale`
+    afterwards keeps the voxel size and the model in agreement, and leaves a
+    single clean transform in the XML. `Plate`/`Well`/`Field` are kept, as the
+    Bio-Formats importer keeps them.
+  - The scripting default is `AS_STORED` (not offered in the dialogs): `open(uri)`
+    keeps the file's own unit, the only lossless choice, so nothing that already
+    worked changed. An image whose axes declare no length unit is left as stored
+    with a warning, rather than being given an invented calibration.
+  - `openLoader` always parses `AS_STORED`: the unit only shapes the setups and
+    registrations, which the BDV XML has already restored, so nothing new needs
+    persisting there.
+  - Covered by `WorldUnitTest` (offline: conversion factors, NGFF unit names and
+    symbols, refusal to convert an uncalibrated image, dialog-choice parsing) and
+    three `OmeZarrOpenerIT` tests on the calibrated reference dataset (metric
+    conversion in voxel size *and* registration, `PIXEL`, and the BigStitcher
+    normalisation + `Displaysettings` stripping).
 
 ## Next
 

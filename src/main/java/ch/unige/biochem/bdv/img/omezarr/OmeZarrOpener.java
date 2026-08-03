@@ -47,6 +47,7 @@ import mpicbg.spim.data.sequence.ViewSetup;
 import mpicbg.spim.data.sequence.VoxelDimensions;
 import net.imglib2.FinalDimensions;
 import net.imglib2.realtransform.AffineTransform3D;
+import spimdata.SpimDataHelper;
 import spimdata.util.Displaysettings;
 import spimdata.util.Field;
 import spimdata.util.Plate;
@@ -79,6 +80,10 @@ import java.util.function.Consumer;
 /**
  * Builds a {@link SpimData} from an OME-Zarr (OME-NGFF v0.4 / v0.5) container,
  * with spatial calibration + unit, timepoints and channels-as-{@link ViewSetup}s.
+ * <p>
+ * By default the calibration keeps the unit the NGFF axes declare; pass a
+ * {@link WorldUnit} to convert it into a common world unit instead (or to
+ * normalise it for BigStitcher).
  * <p>
  * Pixels are served by {@link OmeZarrImageLoader} (an {@code N5ImageLoader}
  * specialisation) using {@link OmeZarrN5Properties}; here we synthesise the
@@ -157,15 +162,47 @@ public class OmeZarrOpener {
 	 */
 	public static AbstractSpimData<?> open(final String uriString, final S3Options s3,
 			final HcsOptions hcs) {
+		return open(uriString, s3, hcs, null);
+	}
+
+	/**
+	 * Opens an OME-Zarr container as a {@link SpimData}, with explicit S3, HCS and
+	 * world-unit settings.
+	 *
+	 * @param uriString file path or URL (S3/https/…) of the {@code .ome.zarr}
+	 *                  container whose root holds a multiscale image or a
+	 *                  {@code plate}.
+	 * @param s3        S3 connection settings, or {@code null} for the defaults.
+	 * @param hcs       how much of an HCS plate to open, or {@code null} for
+	 *                  {@link HcsOptions#DEFAULT}.
+	 * @param unit      the unit to express voxel sizes and registrations in, or
+	 *                  {@code null} for {@link WorldUnit#AS_STORED}, which keeps the
+	 *                  unit the NGFF axes declare.
+	 * @return a {@link SpimData} backed by {@link OmeZarrImageLoader}.
+	 */
+	public static AbstractSpimData<?> open(final String uriString, final S3Options s3,
+			final HcsOptions hcs, final WorldUnit unit) {
 		final URI uri = toUri(uriString);
 		final HcsOptions opts = hcs != null ? hcs : HcsOptions.DEFAULT;
-		final Parsed p = parse(uri, s3, opts);
+		final WorldUnit world = unit != null ? unit : WorldUnit.AS_STORED;
+		final Parsed p = parse(uri, s3, opts, world);
 		final SequenceDescription seq =
 				new SequenceDescription(new TimePoints(p.timePoints), p.setups, null, p.missingViews);
 		final OmeZarrImageLoader loader =
 				new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3, opts);
 		seq.setImgLoader(loader);
-		return new SpimData(new File("."), seq, new ViewRegistrations(p.registrations));
+		final SpimData spimData = new SpimData(new File("."), seq, new ViewRegistrations(p.registrations));
+
+		if (world == WorldUnit.BIGSTITCHER_COMPATIBLE) {
+			// The calibration is already normalised (see applyWorldUnit); what is left
+			// is to drop Displaysettings. BigStitcher refuses to fuse tiles whose
+			// entities differ, even for an entity that has nothing to do with the
+			// grouping — and Displaysettings differs per setup by construction, since
+			// it carries that channel's own color and contrast. Plate/Well/Field are
+			// kept, as the Bio-Formats importer keeps them.
+			SpimDataHelper.removeEntities(spimData, Displaysettings.class);
+		}
+		return spimData;
 	}
 
 	/**
@@ -218,7 +255,9 @@ public class OmeZarrOpener {
 			final HcsOptions hcs, final AbstractSequenceDescription<?, ?, ?> seq) {
 		final URI uri = toUri(uriString);
 		final HcsOptions opts = hcs != null ? hcs : HcsOptions.DEFAULT;
-		final Parsed p = parse(uri, s3, opts);
+		// The world unit only shapes the setups and registrations, which the XML has
+		// already restored, so the loader can be rebuilt without knowing about it.
+		final Parsed p = parse(uri, s3, opts, WorldUnit.AS_STORED);
 		return new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3, opts);
 	}
 
@@ -238,7 +277,8 @@ public class OmeZarrOpener {
 	 * image into the {@link ViewSetup}s / {@link ViewRegistration}s and the
 	 * per-view path / hyperslice maps the loader consumes.
 	 */
-	private static Parsed parse(final URI uri, final S3Options s3, final HcsOptions hcs) {
+	private static Parsed parse(final URI uri, final S3Options s3, final HcsOptions hcs,
+			final WorldUnit unit) {
 
 		// --- 1. Detect the storage format ------------------------------------
 		// OME-NGFF v0.5 is Zarr v3 (StorageFormat.ZARR); v0.4 is Zarr v2 (ZARR2).
@@ -314,6 +354,9 @@ public class OmeZarrOpener {
 				globalMaxT = Math.max(globalMaxT, info.sizeT);
 			}
 		}
+
+		// --- 3b. Express the calibration in the requested world unit ---------
+		applyWorldUnit(images, unit);
 
 		// --- 4. Build ViewSetups / registrations / metadata maps -------------
 		final List<ViewSetup> setups = new ArrayList<>();
@@ -616,6 +659,63 @@ public class OmeZarrOpener {
 		}
 	}
 
+	/**
+	 * Rewrites every image's voxel size and pixel&rarr;physical transform into the
+	 * requested world unit, in place. Called once for the whole container, so a
+	 * multi-image container or an HCS plate is converted by one common factor and
+	 * its images stay in the same world space.
+	 * <p>
+	 * {@link WorldUnit#AS_STORED} does nothing. {@link WorldUnit#PIXEL} drops the
+	 * calibration entirely. A metric unit scales by the ratio of the two units,
+	 * unless the image declares no length unit at all — an uncalibrated image
+	 * cannot be placed in a metric world, and inventing a factor would be worse
+	 * than leaving it alone, so it is kept as stored and a warning is logged.
+	 * {@link WorldUnit#BIGSTITCHER_COMPATIBLE} divides by the first image's
+	 * {@code x} voxel size, so one pixel along {@code x} measures 1 while the
+	 * {@code y/x} and {@code z/x} anisotropy is preserved.
+	 */
+	private static void applyWorldUnit(final List<ImageInfo> images, final WorldUnit unit) {
+		if (unit == WorldUnit.AS_STORED || images.isEmpty()) return;
+
+		if (unit == WorldUnit.PIXEL) {
+			for (final ImageInfo img : images) {
+				img.setCalibration(1, 1, 1, 0, 0, 0, unit.unitName());
+			}
+			log.info("  world unit: pixel — physical calibration dropped");
+			return;
+		}
+
+		final double factor;
+		if (unit == WorldUnit.BIGSTITCHER_COMPATIBLE) {
+			final double sx = images.get(0).voxel.dimension(0);
+			if (!(sx > 0) || !Double.isFinite(sx)) {
+				log.warn("Cannot normalise for BigStitcher: the first image has an x voxel size "
+						+ "of {}. Keeping the calibration as stored.", sx);
+				return;
+			}
+			factor = 1.0 / sx;
+		} else {
+			final String stored = images.get(0).voxel.unit();
+			factor = unit.factorFrom(stored);
+			if (Double.isNaN(factor)) {
+				log.warn("Cannot express \"{}\" in {}: the image declares no length unit. "
+						+ "Keeping the calibration as stored.", stored, unit.unitName());
+				return;
+			}
+		}
+
+		for (final ImageInfo img : images) {
+			final double[] m = img.calibration.getRowPackedCopy();
+			img.setCalibration(
+					img.voxel.dimension(0) * factor,
+					img.voxel.dimension(1) * factor,
+					img.voxel.dimension(2) * factor,
+					m[3] * factor, m[7] * factor, m[11] * factor,
+					unit.unitName());
+		}
+		log.info("  world unit: {} (calibration scaled by {})", unit.unitName(), factor);
+	}
+
 	/** Parses one multiscale image group into calibration + channel metadata. */
 	private static ImageInfo parseImage(final N5Reader n5, final String path, final StorageFormat format) {
 		final OmeNgffMultiScaleMetadata ms = readMultiscale(n5, path, format);
@@ -722,6 +822,21 @@ public class OmeZarrOpener {
 		String[] levelPaths;
 		double[][] mipmapResolutions;
 		Omero omero;
+
+		/**
+		 * Replaces the voxel size and the pixel&rarr;physical transform, e.g. after a
+		 * change of world unit. Both are rebuilt rather than mutated, since the HCS
+		 * fast path shares one {@link #voxel} instance across a whole plate.
+		 */
+		void setCalibration(final double sx, final double sy, final double sz,
+				final double tx, final double ty, final double tz, final String unitName) {
+			voxel = new FinalVoxelDimensions(unitName, sx, sy, sz);
+			calibration = new AffineTransform3D();
+			calibration.set(
+					sx, 0, 0, tx,
+					0, sy, 0, ty,
+					0, 0, sz, tz);
+		}
 
 		/**
 		 * This metadata, re-pointed at another image group. Used for the fields of an

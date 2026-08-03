@@ -26,6 +26,7 @@
 package ch.unige.biochem;
 
 import ch.unige.biochem.bdv.img.omezarr.OmeZarrOpener;
+import ch.unige.biochem.bdv.img.omezarr.WorldUnit;
 import mpicbg.spim.data.SpimData;
 import mpicbg.spim.data.generic.AbstractSpimData;
 import mpicbg.spim.data.generic.sequence.AbstractSequenceDescription;
@@ -47,6 +48,7 @@ import java.util.List;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 
 /**
  * Integration tests for {@link OmeZarrOpener} against pinned, immutable public
@@ -330,6 +332,85 @@ public class OmeZarrOpenerIT {
 	}
 
 	// ---------------------------------------------------------------------------
+	// World coordinate units: the importers' unit choice, on a calibrated dataset
+	// ---------------------------------------------------------------------------
+
+	/**
+	 * The reference dataset stores micrometers; every metric world unit is that
+	 * calibration rescaled, in both the voxel size and the registration.
+	 */
+	@Test
+	public void worldUnit_convertsCalibration() {
+		// Millimeter, the default of both Fiji commands.
+		final AbstractSpimData<?> mm = openOrSkip(A_V04_6001240, WorldUnit.MILLIMETER);
+		final ViewSetup vsMm = (ViewSetup) setups(mm).get(0);
+		assertEquals("millimeter", vsMm.getVoxelSize().unit());
+		assertEquals(VX_6001240 * 1e-3, vsMm.getVoxelSize().dimension(0), EPS * 1e-3);
+		assertEquals(VZ_6001240 * 1e-3, vsMm.getVoxelSize().dimension(2), EPS * 1e-3);
+		assertArrayEquals("registration is scaled with it",
+				new double[] { VX_6001240 * 1e-3, VX_6001240 * 1e-3, VZ_6001240 * 1e-3 },
+				scale(mm, 0, 0), EPS * 1e-3);
+
+		// Micrometer is what the file already uses, so nothing must move.
+		final AbstractSpimData<?> um = openOrSkip(A_V04_6001240, WorldUnit.MICROMETER);
+		final ViewSetup vsUm = (ViewSetup) setups(um).get(0);
+		assertEquals("micrometer", vsUm.getVoxelSize().unit());
+		assertEquals(VX_6001240, vsUm.getVoxelSize().dimension(0), EPS);
+		assertEquals(VZ_6001240, vsUm.getVoxelSize().dimension(2), EPS);
+
+		// Nanometer goes the other way.
+		final ViewSetup vsNm = (ViewSetup) setups(openOrSkip(A_V04_6001240, WorldUnit.NANOMETER)).get(0);
+		assertEquals("nanometer", vsNm.getVoxelSize().unit());
+		assertEquals(VX_6001240 * 1e3, vsNm.getVoxelSize().dimension(0), EPS * 1e3);
+
+		// The image size is a pixel count and must never follow the unit.
+		assertArrayEquals(new long[] { 271, 275, 236 }, sizeXYZ(vsMm));
+		assertArrayEquals(new long[] { 271, 275, 236 }, sizeXYZ(vsNm));
+	}
+
+	/** PIXEL drops the calibration entirely — voxel 1,1,1 and an identity model. */
+	@Test
+	public void worldUnit_pixelDropsCalibration() {
+		final AbstractSpimData<?> sd = openOrSkip(A_V04_6001240, WorldUnit.PIXEL);
+		final ViewSetup vs = (ViewSetup) setups(sd).get(0);
+
+		assertEquals("pixel", vs.getVoxelSize().unit());
+		for (int d = 0; d < 3; d++) {
+			assertEquals("voxel[" + d + "]", 1.0, vs.getVoxelSize().dimension(d), EPS);
+		}
+		assertArrayEquals(new double[] { 1, 1, 1 }, scale(sd, 0, 0), EPS);
+		assertArrayEquals(new double[] { 0, 0, 0 }, translation(sd, 0, 0), EPS);
+	}
+
+	/**
+	 * BIGSTITCHER COMPATIBLE normalises so one pixel along x measures 1, keeping the
+	 * z/x anisotropy in the model — and drops the Displaysettings entities, because
+	 * BigStitcher will not fuse tiles whose entities differ, even for an entity
+	 * irrelevant to the grouping, and Displaysettings differs per setup by
+	 * construction (it carries that channel's own color and contrast).
+	 */
+	@Test
+	public void worldUnit_bigStitcherNormalisesAndStripsDisplaysettings() {
+		final AbstractSpimData<?> sd = openOrSkip(A_V04_6001240, WorldUnit.BIGSTITCHER_COMPATIBLE);
+		final List<? extends BasicViewSetup> setups = setups(sd);
+		final ViewSetup vs = (ViewSetup) setups.get(0);
+
+		final double anisotropy = VZ_6001240 / VX_6001240;
+		assertEquals("pixel", vs.getVoxelSize().unit());
+		assertEquals("one pixel in x measures 1", 1.0, vs.getVoxelSize().dimension(0), EPS);
+		assertEquals("y is isotropic with x here", 1.0, vs.getVoxelSize().dimension(1), EPS);
+		assertEquals("z keeps its anisotropy", anisotropy, vs.getVoxelSize().dimension(2), EPS);
+		assertArrayEquals(new double[] { 1.0, 1.0, anisotropy }, scale(sd, 0, 0), EPS);
+
+		for (final BasicViewSetup s : setups) {
+			assertNull("Displaysettings must be stripped: differing entities block fusion",
+					((ViewSetup) s).getAttribute(Displaysettings.class));
+		}
+		// The channel entities are structural and stay.
+		assertNotNull(vs.getAttribute(Channel.class));
+	}
+
+	// ---------------------------------------------------------------------------
 	// Pixel path: force a real block load and confirm c/t hyperslicing to 3D
 	// ---------------------------------------------------------------------------
 
@@ -414,10 +495,15 @@ public class OmeZarrOpenerIT {
 	 * off, the IDR host is unreachable, or native blosc is missing.
 	 */
 	private static AbstractSpimData<?> openOrSkip(final String url) {
+		return openOrSkip(url, null);
+	}
+
+	/** As {@link #openOrSkip(String)}, in an explicit world coordinate unit. */
+	private static AbstractSpimData<?> openOrSkip(final String url, final WorldUnit unit) {
 		Assume.assumeTrue("opt-in: run with -Domezarr.integration=true", INTEGRATION);
 		Assume.assumeTrue("IDR host unreachable", isReachable());
 		try {
-			return OmeZarrOpener.open(url);
+			return OmeZarrOpener.open(url, null, null, unit);
 		} catch (final NoClassDefFoundError | UnsatisfiedLinkError e) {
 			// v0.4/Zarr-v2 needs native blosc even to read compressor metadata.
 			Assume.assumeNoException("native blosc unavailable (set -Djna.library.path)", e);
@@ -463,8 +549,18 @@ public class OmeZarrOpenerIT {
 
 	/** The (tx, ty, tz) translation column of a view's registration model. */
 	private static double[] translation(final AbstractSpimData<?> sd, final int t, final int setup) {
-		final double[] m = ((SpimData) sd).getViewRegistrations()
-				.getViewRegistration(new ViewId(t, setup)).getModel().getRowPackedCopy();
+		final double[] m = model(sd, t, setup);
 		return new double[] { m[3], m[7], m[11] };
+	}
+
+	/** The (sx, sy, sz) diagonal of a view's registration model. */
+	private static double[] scale(final AbstractSpimData<?> sd, final int t, final int setup) {
+		final double[] m = model(sd, t, setup);
+		return new double[] { m[0], m[5], m[10] };
+	}
+
+	private static double[] model(final AbstractSpimData<?> sd, final int t, final int setup) {
+		return ((SpimData) sd).getViewRegistrations()
+				.getViewRegistration(new ViewId(t, setup)).getModel().getRowPackedCopy();
 	}
 }

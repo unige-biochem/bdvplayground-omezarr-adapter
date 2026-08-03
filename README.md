@@ -23,7 +23,7 @@ dataset-path / hyperslice metadata the loader consumes.
 
 | OME-NGFF | SpimData |
 | --- | --- |
-| `axes` + level-0 `scale` / `translation` | `ViewSetup` voxel size + unit, `ViewRegistration` (pixel → physical) |
+| `axes` + level-0 `scale` / `translation` | `ViewSetup` voxel size + unit, `ViewRegistration` (pixel → physical), optionally converted to a chosen world unit |
 | `channel` axis | one `ViewSetup` per channel, each with a `Channel` entity |
 | `time` axis | `TimePoints` (per-timepoint views) |
 | `omero` channels (`label`, `color`, `window`) | a `Displaysettings` entity (spimdata-extras: name + color + contrast) per `ViewSetup` |
@@ -148,10 +148,11 @@ See [`PLAN.md`](PLAN.md) for the roadmap.
 | Open an OME-Zarr dataset | `Plugins > BigDataViewer-Playground > Import > Dataset - Create [OME-Zarr]` |
 | Open an OME-Zarr on an S3 store | `Plugins > BigDataViewer-Playground > Import > Dataset - Create [OME-Zarr on S3]` |
 
-The first command takes a single location field (path or URL); the second adds an
-S3 endpoint, region, addressing style and optional credentials. Both output an
-`AbstractSpimData`, which BigDataViewer-Playground displays and registers, and
-both open an HCS plate whole — the `HcsOptions` caps are a scripting option.
+The first command takes a location field (path or URL) and a world-unit choice;
+the second adds an S3 endpoint, region, addressing style and optional
+credentials. Both output an `AbstractSpimData`, which BigDataViewer-Playground
+displays and registers, and both open an HCS plate whole — the `HcsOptions` caps
+are a scripting option.
 
 ## Scripting
 

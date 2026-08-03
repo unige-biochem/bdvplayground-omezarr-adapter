@@ -27,6 +27,7 @@ package ch.unige.biochem.bdv.img.omezarr.command;
 
 import ch.unige.biochem.bdv.img.omezarr.OmeZarrOpener;
 import ch.unige.biochem.bdv.img.omezarr.S3Options;
+import ch.unige.biochem.bdv.img.omezarr.WorldUnit;
 import mpicbg.spim.data.generic.AbstractSpimData;
 import org.scijava.ItemIO;
 import org.scijava.command.Command;
@@ -86,12 +87,19 @@ public class OpenOmeZarrS3Command implements Command {
 			style = TextWidget.PASSWORD_STYLE, required = false)
 	String secretKey = "";
 
+	@Parameter(required = false,
+			label = "World coordinate units",
+			description = "Unit for the coordinate system where images will be positioned.",
+			choices = { "MILLIMETER", "MICROMETER", "NANOMETER", "PIXEL", "BIGSTITCHER COMPATIBLE" })
+	public String unit = "MILLIMETER";
+
 	@Parameter(type = ItemIO.OUTPUT)
 	AbstractSpimData<?> spimData;
 
 	@Override
 	public void run() {
 		spimData = OmeZarrOpener.open(url,
-				new S3Options(endpoint, region, pathStyle, accessKey, secretKey));
+				new S3Options(endpoint, region, pathStyle, accessKey, secretKey),
+				null, WorldUnit.fromChoice(unit));
 	}
 }
