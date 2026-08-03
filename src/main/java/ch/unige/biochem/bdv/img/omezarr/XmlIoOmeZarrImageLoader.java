@@ -52,6 +52,12 @@ import java.io.File;
  * remote containers ({@code https://}, S3) round-trip correctly. Local containers
  * are therefore stored as absolute URIs.
  * <p>
+ * For an HCS plate the {@link HcsOptions} caps are persisted too. Re-running
+ * discovery has to reproduce the very same list of field images, since that list
+ * is what assigns the setup ids the XML refers to; a plate opened with
+ * {@code wells(4).fields(2)} would otherwise reload as the whole plate and the
+ * ids would no longer mean the same thing.
+ * <p>
  * For an {@code s3://} container the {@link S3Options} endpoint / region /
  * addressing style are persisted alongside the URI, since an {@code s3://} URI on
  * its own does not say which object store to talk to.
@@ -79,6 +85,15 @@ public class XmlIoOmeZarrImageLoader implements XmlIoBasicImgLoader<OmeZarrImage
 	/** Child element holding the S3 addressing style ({@code true} = path style). */
 	private static final String S3_PATH_STYLE_TAG = "s3pathstyle";
 
+	/** Child element holding the HCS well cap, absent when the plate was opened whole. */
+	private static final String HCS_MAX_WELLS_TAG = "hcsmaxwells";
+
+	/** Child element holding the HCS field cap, absent when every field was opened. */
+	private static final String HCS_MAX_FIELDS_TAG = "hcsmaxfields";
+
+	/** Child element holding the HCS per-field metadata flag, absent when uniform. */
+	private static final String HCS_STRICT_TAG = "hcsstrictperfield";
+
 	@Override
 	public Element toXml(final OmeZarrImageLoader imgLoader, final File basePath) {
 		final Element elem = new Element("ImageLoader");
@@ -98,6 +113,20 @@ public class XmlIoOmeZarrImageLoader implements XmlIoBasicImgLoader<OmeZarrImage
 			elem.addContent(XmlHelpers.textElement(
 					S3_PATH_STYLE_TAG, Boolean.toString(s3.isPathStyle())));
 		}
+
+		// The HCS caps, which are part of the dataset's identity (see the javadoc).
+		final HcsOptions hcs = imgLoader.getHcsOptions();
+		if (hcs != null && !hcs.isDefault()) {
+			if (hcs.getMaxWells() != HcsOptions.UNLIMITED) {
+				elem.addContent(XmlHelpers.intElement(HCS_MAX_WELLS_TAG, hcs.getMaxWells()));
+			}
+			if (hcs.getMaxFieldsPerWell() != HcsOptions.UNLIMITED) {
+				elem.addContent(XmlHelpers.intElement(HCS_MAX_FIELDS_TAG, hcs.getMaxFieldsPerWell()));
+			}
+			if (hcs.isStrictPerField()) {
+				elem.addContent(XmlHelpers.textElement(HCS_STRICT_TAG, "true"));
+			}
+		}
 		return elem;
 	}
 
@@ -105,7 +134,8 @@ public class XmlIoOmeZarrImageLoader implements XmlIoBasicImgLoader<OmeZarrImage
 	public OmeZarrImageLoader fromXml(final Element elem, final File basePath,
 			final AbstractSequenceDescription<?, ?, ?> sequenceDescription) {
 		final String uri = XmlHelpers.getText(elem, URI_TAG);
-		return OmeZarrOpener.openLoader(uri, s3OptionsFromXml(elem), sequenceDescription);
+		return OmeZarrOpener.openLoader(
+				uri, s3OptionsFromXml(elem), hcsOptionsFromXml(elem), sequenceDescription);
 	}
 
 	/**
@@ -119,5 +149,24 @@ public class XmlIoOmeZarrImageLoader implements XmlIoBasicImgLoader<OmeZarrImage
 		final String pathStyle = XmlHelpers.getText(elem, S3_PATH_STYLE_TAG, null);
 		if (endpoint == null && region == null && pathStyle == null) return null;
 		return new S3Options(endpoint, region, Boolean.parseBoolean(pathStyle), null, null);
+	}
+
+	/**
+	 * Rebuilds the HCS discovery settings. An XML written for a whole plate, for a
+	 * container that is not a plate, or before HCS support simply has none of these
+	 * elements and yields {@code null}, i.e. {@link HcsOptions#DEFAULT}.
+	 */
+	static HcsOptions hcsOptionsFromXml(final Element elem) {
+		final String maxWells = XmlHelpers.getText(elem, HCS_MAX_WELLS_TAG, null);
+		final String maxFields = XmlHelpers.getText(elem, HCS_MAX_FIELDS_TAG, null);
+		final String strict = XmlHelpers.getText(elem, HCS_STRICT_TAG, null);
+		if (maxWells == null && maxFields == null && strict == null) return null;
+
+		HcsOptions hcs = maxWells != null
+				? HcsOptions.wells(Integer.parseInt(maxWells.trim()))
+				: HcsOptions.all();
+		if (maxFields != null) hcs = hcs.fields(Integer.parseInt(maxFields.trim()));
+		if (Boolean.parseBoolean(strict)) hcs = hcs.strict();
+		return hcs;
 	}
 }

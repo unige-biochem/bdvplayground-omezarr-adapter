@@ -80,6 +80,7 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 	private final N5Properties properties;
 	private final Map<ViewId, HyperSlice> hyperSlices;
 	private final S3Options s3Options;
+	private final HcsOptions hcsOptions;
 
 	/**
 	 * @param reader      an already-opened reader on the container.
@@ -92,7 +93,7 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 	public OmeZarrImageLoader(final N5Reader reader, final URI uri,
 			final AbstractSequenceDescription<?, ?, ?> seq,
 			final N5Properties props, final Map<ViewId, HyperSlice> hyperSlices) {
-		this(reader, uri, seq, props, hyperSlices, null);
+		this(reader, uri, seq, props, hyperSlices, null, null);
 	}
 
 	/**
@@ -110,10 +111,32 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 			final AbstractSequenceDescription<?, ?, ?> seq,
 			final N5Properties props, final Map<ViewId, HyperSlice> hyperSlices,
 			final S3Options s3Options) {
+		this(reader, uri, seq, props, hyperSlices, s3Options, null);
+	}
+
+	/**
+	 * @param reader      an already-opened reader on the container.
+	 * @param uri         the container URI.
+	 * @param seq         the sequence description.
+	 * @param props       the OME-Zarr metadata/path resolver.
+	 * @param hyperSlices per-{@code (timepoint,setup)} description of the reduction
+	 *                    from the stored array down to a 3D view.
+	 * @param s3Options   the S3 settings {@code reader} was opened with, or
+	 *                    {@code null} for a local, {@code https://} or plain-AWS
+	 *                    container.
+	 * @param hcsOptions  the HCS settings the plate was discovered with, or
+	 *                    {@code null} / {@link HcsOptions#DEFAULT} for a container
+	 *                    that is not a plate, or a plate opened whole.
+	 */
+	public OmeZarrImageLoader(final N5Reader reader, final URI uri,
+			final AbstractSequenceDescription<?, ?, ?> seq,
+			final N5Properties props, final Map<ViewId, HyperSlice> hyperSlices,
+			final S3Options s3Options, final HcsOptions hcsOptions) {
 		super(reader, uri, seq);
 		this.properties = props;
 		this.hyperSlices = hyperSlices;
 		this.s3Options = s3Options;
+		this.hcsOptions = hcsOptions;
 	}
 
 	/**
@@ -124,6 +147,16 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 	 */
 	public S3Options getS3Options() {
 		return s3Options;
+	}
+
+	/**
+	 * The HCS settings this loader's plate was discovered with, or {@code null}.
+	 * Like {@link #getS3Options()} this is metadata about how the dataset was
+	 * built, kept so that a saved BDV XML can be re-discovered identically —
+	 * capping the wells or fields changes which setup ids exist.
+	 */
+	public HcsOptions getHcsOptions() {
+		return hcsOptions;
 	}
 
 	@Override

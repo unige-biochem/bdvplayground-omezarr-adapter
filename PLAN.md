@@ -59,6 +59,7 @@ series discovery; writing/export.
 | `bdv/img/omezarr/command/OpenOmeZarrCommand.java` | SciJava `Command`: URL field → outputs `AbstractSpimData`. |
 | `bdv/img/omezarr/command/OpenOmeZarrS3Command.java` | SciJava `Command`: `s3://` URI + endpoint + optional credentials. |
 | `bdv/img/omezarr/S3Options.java` | S3 endpoint / region / addressing style / credentials, applied via `N5Factory.s3Configuration`. |
+| `bdv/img/omezarr/HcsOptions.java` | How much of an HCS plate to open (well / field caps) and how carefully (uniform fields vs per-field metadata). |
 | `SpimDataPostprocessor` (already present, test) | Auto-shows any `AbstractSpimData` command output in BDV. |
 | `OpenOmeZarrDemo` (test) | Smoke test against a public OME-Zarr. |
 
@@ -135,6 +136,48 @@ series discovery; writing/export.
   a real `S3ClientBuilder`) and `OmeZarrS3IT` (opens IDR over `s3://` and asserts
   metadata parity with the `https://` open of the same container).
 
+- [x] **HCS plates** (`HcsOptions`) — a container whose root carries a `plate`
+  attribute is detected as a third layout, next to "one image at the root" and
+  "bioformats2raw series". Discovery needs no probing: `plate` names every well
+  group and each well's `well` attribute names its field images, so a field image
+  is just `"<wellPath>/<imagePath>"` and goes through `parseImage` unchanged. Each
+  field becomes its own `Tile` + channel `ViewSetup`s, tagged with `Plate` /
+  `Well` (name from the plate's own row+column labels, plus row/column indices) /
+  `Field` entities from spimdata-extras, which serialize into the BDV XML on their
+  own (`@ViewSetupAttributeIo`). Wells are sorted by (row, column) so the plate
+  opens in reading order; field ids restart per well, `Tile` ids do not.
+  - **Scale.** A plate is 1568 field images / 7840 `ViewSetup`s (idr0090), and a
+    naive parse is two HTTP round-trips per field. Fields of a plate come from one
+    acquisition, so by default **one field is parsed and its layout reused** for
+    all of them (`ImageInfo.copyFor` re-points only the per-level dataset paths) —
+    constant three requests instead of ~3100. `HcsOptions.strictPerField()` opts
+    back into reading every field; `wells(n).fields(m)` opens a corner of a plate.
+    The caps are a scripting option — the Fiji commands open a plate whole, so the
+    dialogs stay a single location field.
+  - The caps are **persisted in the BDV XML**, like the S3 connection: capped
+    discovery decides which field images exist and hence which setup ids the XML
+    refers to, so it has to be replayed identically on load.
+  - Gotcha handled: the Zarr-**v3** reader will return the root-level attributes of
+    a Zarr-**v2** container, so a lenient "try root, then `ome/`" read of `plate`
+    (the pattern `readOmero` uses) made a v0.4 plate detect as v0.5 — after which
+    every field's `multiscales` was looked for under the wrong nesting. `readPlate`
+    / `readWell` are therefore keyed on the storage format, like `readMultiscale`.
+  - No `MissingViews` are involved: each field image is its own `ViewSetup`, so a
+    well with fewer fields simply contributes fewer setups rather than leaving a
+    hole in the (setup × timepoint) grid.
+  - 2D plates (the majority of IDR) need nothing extra — they go through the same
+    single-slice-volume path as any other 2D image.
+  - Covered by `OmeZarrHcsIT` against two pinned IDR plates: **idr0090** (v0.5 /
+    Zarr-v3, 49 wells × 32 fields × 5 channels, 3D `z = 31`, `plate` under `ome`)
+    opened whole, and **idr0001A/2551** (v0.4 / Zarr-v2, 96 wells × 6 fields × 2
+    channels, root-level `plate`, one image per acquisition) opened capped. Golden
+    assertions on plate name, well count / ids / names / row+column, field and tile
+    ids, channel names + omero colors, sizes and voxel sizes; plus a
+    uniform-vs-`strictPerField` equivalence test that keeps the shortcut honest, an
+    XML round-trip proving `Plate`/`Well`/`Field` and the caps survive, and a pixel
+    load of a field that was *not* the template. Same opt-in gating as
+    `OmeZarrOpenerIT`; the whole class runs in ~30 s.
+
 ## Next
 
 - [ ] **Interactive** BDV display check (`OpenOmeZarrDemo.main` with a UI; note
@@ -142,7 +185,9 @@ series discovery; writing/export.
 - [ ] Register sources into BDV-Playground's `SourceService`/`SourceTree` (so the
   attached `Displaysettings` actually colors the sources) — needs a
   bdv-playground (test-scope) dependency.
-- [ ] HCS plate/well support (plate → wells → fields discovery on top of the
-  existing image parsing; most IDR plates are 2D, which is now handled).
 - [ ] Cache: reuse Playground's global cache (the loader's
   `VolatileGlobalCellCache` is the injection point).
+- [ ] HCS follow-ups: expose the plate's `acquisitions` (a well image carries an
+  `acquisition` id, which could become a `TimePoint` or an entity of its own), and
+  lay fields out on a plate grid via `ViewRegistration` rather than stacking them
+  all at the origin.

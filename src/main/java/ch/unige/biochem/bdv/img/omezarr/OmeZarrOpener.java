@@ -48,6 +48,9 @@ import mpicbg.spim.data.sequence.VoxelDimensions;
 import net.imglib2.FinalDimensions;
 import net.imglib2.realtransform.AffineTransform3D;
 import spimdata.util.Displaysettings;
+import spimdata.util.Field;
+import spimdata.util.Plate;
+import spimdata.util.Well;
 import org.janelia.saalfeldlab.n5.N5Reader;
 import org.janelia.saalfeldlab.n5.universe.N5Factory;
 import org.janelia.saalfeldlab.n5.universe.StorageFormat;
@@ -67,6 +70,7 @@ import java.io.File;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -86,12 +90,16 @@ import java.util.function.Consumer;
  * {@link ViewSetup}, so BigDataViewer-Playground can apply them without this
  * library depending on it.
  * <p>
- * Supports a single image at the container root, or a {@code bioformats2raw}
- * container whose images are integer-named child groups ({@code 0, 1, …}),
- * discovered by probing. Each image needs axes {@code (y,x)}, optionally
- * {@code z}, plus optional {@code c} and {@code t}; a 2D image (no {@code z}) is
- * presented as a single-slice volume, since BigDataViewer sources are 3D. HCS
- * plates and labels are out of scope for now (see {@code PLAN.md}).
+ * Supports a single image at the container root, a {@code bioformats2raw}
+ * container whose images are integer-named child groups ({@code 0, 1, …})
+ * discovered by probing, and an <b>HCS plate</b>, whose field images are
+ * enumerated from the {@code plate} / {@code well} metadata and tagged with
+ * {@link spimdata.util.Plate} / {@link spimdata.util.Well} /
+ * {@link spimdata.util.Field} entities (see {@link HcsOptions} for how much of a
+ * plate is opened, and how carefully). Each image needs axes {@code (y,x)},
+ * optionally {@code z}, plus optional {@code c} and {@code t}; a 2D image (no
+ * {@code z}) is presented as a single-slice volume, since BigDataViewer sources
+ * are 3D. {@code labels} groups are out of scope for now (see {@code PLAN.md}).
  */
 public class OmeZarrOpener {
 
@@ -131,12 +139,31 @@ public class OmeZarrOpener {
 	 * @return a {@link SpimData} backed by {@link OmeZarrImageLoader}.
 	 */
 	public static AbstractSpimData<?> open(final String uriString, final S3Options s3) {
+		return open(uriString, s3, null);
+	}
+
+	/**
+	 * Opens an OME-Zarr container as a {@link SpimData}, with explicit S3 and HCS
+	 * settings.
+	 *
+	 * @param uriString file path or URL (S3/https/…) of the {@code .ome.zarr}
+	 *                  container whose root holds a multiscale image or a
+	 *                  {@code plate}.
+	 * @param s3        S3 connection settings, or {@code null} for the defaults.
+	 * @param hcs       how much of an HCS plate to open and how carefully, or
+	 *                  {@code null} for {@link HcsOptions#DEFAULT}. Inert for a
+	 *                  container that is not a plate.
+	 * @return a {@link SpimData} backed by {@link OmeZarrImageLoader}.
+	 */
+	public static AbstractSpimData<?> open(final String uriString, final S3Options s3,
+			final HcsOptions hcs) {
 		final URI uri = toUri(uriString);
-		final Parsed p = parse(uri, s3);
+		final HcsOptions opts = hcs != null ? hcs : HcsOptions.DEFAULT;
+		final Parsed p = parse(uri, s3, opts);
 		final SequenceDescription seq =
 				new SequenceDescription(new TimePoints(p.timePoints), p.setups, null, p.missingViews);
 		final OmeZarrImageLoader loader =
-				new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3);
+				new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3, opts);
 		seq.setImgLoader(loader);
 		return new SpimData(new File("."), seq, new ViewRegistrations(p.registrations));
 	}
@@ -168,9 +195,31 @@ public class OmeZarrOpener {
 	 */
 	public static OmeZarrImageLoader openLoader(final String uriString, final S3Options s3,
 			final AbstractSequenceDescription<?, ?, ?> seq) {
+		return openLoader(uriString, s3, null, seq);
+	}
+
+	/**
+	 * As {@link #openLoader(String, S3Options, AbstractSequenceDescription)}, with
+	 * explicit HCS settings.
+	 * <p>
+	 * These have to be the settings the dataset was originally opened with: capping
+	 * discovery changes which field images exist and therefore which setup ids they
+	 * carry, so a saved plate only lines up with its XML when it is re-discovered
+	 * the same way. {@link XmlIoOmeZarrImageLoader} persists them for exactly that
+	 * reason.
+	 *
+	 * @param uriString the container URI stored in the XML.
+	 * @param s3        S3 connection settings, or {@code null} for the defaults.
+	 * @param hcs       the HCS settings stored in the XML, or {@code null} for
+	 *                  {@link HcsOptions#DEFAULT}.
+	 * @param seq       the sequence description restored from the XML.
+	 */
+	public static OmeZarrImageLoader openLoader(final String uriString, final S3Options s3,
+			final HcsOptions hcs, final AbstractSequenceDescription<?, ?, ?> seq) {
 		final URI uri = toUri(uriString);
-		final Parsed p = parse(uri, s3);
-		return new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3);
+		final HcsOptions opts = hcs != null ? hcs : HcsOptions.DEFAULT;
+		final Parsed p = parse(uri, s3, opts);
+		return new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3, opts);
 	}
 
 	/** Everything discovery/parsing yields, shared by {@link #open} and {@link #openLoader}. */
@@ -189,19 +238,22 @@ public class OmeZarrOpener {
 	 * image into the {@link ViewSetup}s / {@link ViewRegistration}s and the
 	 * per-view path / hyperslice maps the loader consumes.
 	 */
-	private static Parsed parse(final URI uri, final S3Options s3) {
+	private static Parsed parse(final URI uri, final S3Options s3, final HcsOptions hcs) {
 
 		// --- 1. Detect the storage format ------------------------------------
 		// OME-NGFF v0.5 is Zarr v3 (StorageFormat.ZARR); v0.4 is Zarr v2 (ZARR2).
-		// A URL may point at a single image, OR at a bioformats2raw container
-		// whose images are child groups "0", "1", ... (no multiscales at root).
+		// A URL may point at a single image, at a bioformats2raw container whose
+		// images are child groups "0", "1", ... (no multiscales at root), or at an
+		// HCS plate, which has no multiscales at the root either but does carry a
+		// "plate" attribute naming its wells.
 		StorageFormat format = null;
 		Exception lastFailure = null;
 		for (final StorageFormat candidate : new StorageFormat[] { StorageFormat.ZARR, StorageFormat.ZARR2 }) {
 			try {
 				final N5Reader probe = openReader(candidate, uri, s3);
 				if (readMultiscale(probe, ROOT_GROUP, candidate) != null
-						|| readMultiscale(probe, "/0", candidate) != null) {
+						|| readMultiscale(probe, "/0", candidate) != null
+						|| readPlate(probe, candidate) != null) {
 					format = candidate;
 					break;
 				}
@@ -211,14 +263,14 @@ public class OmeZarrOpener {
 			}
 		}
 		if (format == null) {
-			// Both probes came up empty. That is usually a layout we don't support,
+			// Every probe came up empty. That is usually a layout we don't support,
 			// but it is also what a connection problem looks like from here — an
 			// s3:// URI without an endpoint, say — so carry the last failure as the
 			// cause rather than reporting only the layout diagnosis.
 			throw new IllegalArgumentException(
-					"No OME-NGFF multiscale metadata found at " + uri + " or its child \"0\". " +
-					"If this is an HCS plate or an unusual layout it is not yet supported; " +
-					"otherwise point at the image group directly." +
+					"No OME-NGFF multiscale metadata found at " + uri + ", its child \"0\", " +
+					"and no HCS \"plate\" attribute either. If this is an unusual layout it is " +
+					"not yet supported; otherwise point at the image group directly." +
 					(uri.getScheme() != null && uri.getScheme().equalsIgnoreCase("s3") && s3 == null
 							? " Note that an s3:// URI carries no endpoint: for a store that is not"
 							+ " AWS, open it with S3 settings (see the [OME-Zarr on S3] command)."
@@ -228,17 +280,39 @@ public class OmeZarrOpener {
 
 		// --- 2. Discover the image group(s) inside the container -------------
 		final N5Reader n5 = openReader(format, uri, s3);
-		final List<String> imagePaths = discoverImagePaths(n5, format);
-		final boolean multiImage = imagePaths.size() > 1;
-		log.info("Opened {} as {}: {} image(s) at {}", uri, format, imagePaths.size(), imagePaths);
+		final PlateMeta plate = readPlate(n5, format);
+		final List<ImageRef> refs;
+		if (plate != null) {
+			refs = discoverPlateImages(n5, format, plate, hcs);
+			log.info("Opened {} as {}: HCS plate \"{}\", {} field image(s), {}",
+					uri, format, plate.name, refs.size(), hcs);
+		} else {
+			refs = new ArrayList<>();
+			for (final String path : discoverImagePaths(n5, format)) {
+				refs.add(new ImageRef(path, null));
+			}
+			log.info("Opened {} as {}: {} image(s)", uri, format, refs.size());
+		}
+		final boolean multiImage = refs.size() > 1;
 
 		// --- 3. Parse each image's metadata (calibration, channels, omero) ---
+		// Every field of a plate comes from the same acquisition, so unless asked
+		// to be strict we read one field and reuse its layout for all the others —
+		// the difference between three HTTP round-trips and two per field.
 		final List<ImageInfo> images = new ArrayList<>();
 		int globalMaxT = 1;
-		for (final String path : imagePaths) {
-			final ImageInfo info = parseImage(n5, path, format);
-			images.add(info);
-			globalMaxT = Math.max(globalMaxT, info.sizeT);
+		if (plate != null && !hcs.isStrictPerField()) {
+			final ImageInfo template = parseTemplateImage(n5, refs, format);
+			for (final ImageRef ref : refs) {
+				images.add(template.copyFor(ref.path));
+			}
+			globalMaxT = template.sizeT;
+		} else {
+			for (final ImageRef ref : refs) {
+				final ImageInfo info = parseImage(n5, ref.path, format);
+				images.add(info);
+				globalMaxT = Math.max(globalMaxT, info.sizeT);
+			}
 		}
 
 		// --- 4. Build ViewSetups / registrations / metadata maps -------------
@@ -249,9 +323,15 @@ public class OmeZarrOpener {
 		final Map<Integer, ImageEntry> bySetup = new HashMap<>();    // same, per setup
 		final Map<ViewId, HyperSlice> hyperSlices = new HashMap<>(); // nD array → 3D view
 
+		// One shared entity instance per plate / per well, so the SpimData entity
+		// lists (and the XML) hold each of them exactly once.
+		final Plate plateEntity = plate != null ? new Plate(0, plateName(plate, uri)) : null;
+		final Map<Integer, Well> wellEntities = new HashMap<>();
+
 		int setupId = 0;
 		for (int s = 0; s < images.size(); s++) {
 			final ImageInfo img = images.get(s);
+			final HcsCoords coords = refs.get(s).hcs;
 			final ImageEntry entry = new ImageEntry(
 					img.levelPaths, img.mipmapResolutions, img.dimX, img.dimY, img.dimZ);
 			for (int c = 0; c < img.sizeC; c++) {
@@ -259,17 +339,33 @@ public class OmeZarrOpener {
 						&& c < img.omero.channels.length) ? img.omero.channels[c] : null;
 				final String channelLabel = (oc != null && oc.label != null && !oc.label.isEmpty())
 						? oc.label : "channel " + c;
-				final String setupName = multiImage ? ("s" + s + " - " + channelLabel) : channelLabel;
+				final String setupName;
+				if (coords != null) {
+					setupName = coords.wellName + " - f" + coords.fieldId + " - " + channelLabel;
+				} else if (multiImage) {
+					setupName = "s" + s + " - " + channelLabel;
+				} else {
+					setupName = channelLabel;
+				}
 
 				final ViewSetup vs = new ViewSetup(
 						setupId,
 						setupName,
 						img.size,
 						img.voxel,
-						new Tile(s), // one tile per image, so series stay grouped
+						new Tile(s), // one tile per image, so series/fields stay grouped
 						new Channel(c, channelLabel),
 						new Angle(0),
 						new Illumination(0));
+
+				// Plate / well / field entities (spimdata-extras), so downstream tools
+				// can group and filter the sources by their position on the plate.
+				if (coords != null) {
+					vs.setAttribute(plateEntity);
+					vs.setAttribute(wellEntities.computeIfAbsent(coords.wellId,
+							id -> new Well(id, coords.wellName, coords.row, coords.column)));
+					vs.setAttribute(new Field(coords.fieldId));
+				}
 
 				// Display settings entity (color + contrast), read by BDV-Playground.
 				final Displaysettings ds = new Displaysettings(setupId, setupName);
@@ -366,10 +462,158 @@ public class OmeZarrOpener {
 		}
 		if (paths.isEmpty()) {
 			throw new IllegalArgumentException(
-					"Container has no multiscale image at the root and no series \"0\". " +
-					"HCS plates and other layouts are not yet supported.");
+					"Container has no multiscale image at the root, no series \"0\" and no " +
+					"HCS \"plate\" attribute. Other layouts are not yet supported.");
 		}
 		return paths;
+	}
+
+	/**
+	 * Lists the field images of an HCS plate, in row/column order of the wells and
+	 * in the order each well lists its images, capped by {@code hcs}.
+	 * <p>
+	 * Nothing is probed: the {@code plate} attribute names every well group, and
+	 * each well group's {@code well} attribute names every field image inside it,
+	 * so this costs one attribute read per well. A well that is listed but cannot
+	 * be read is logged and skipped rather than failing the whole plate — a partial
+	 * upload is a real thing on a public store.
+	 */
+	private static List<ImageRef> discoverPlateImages(final N5Reader n5, final StorageFormat format,
+			final PlateMeta plate, final HcsOptions hcs) {
+		if (plate.wells == null || plate.wells.length == 0) {
+			throw new IllegalArgumentException("HCS plate \"" + plate.name + "\" lists no wells.");
+		}
+
+		// Sort by (row, column) so the plate opens in reading order. Discovery has
+		// to be deterministic in any case: XmlIoOmeZarrImageLoader re-runs it on
+		// load and relies on the setup ids coming out the same.
+		final List<PlateWell> wells = new ArrayList<>();
+		for (final PlateWell w : plate.wells) {
+			if (w != null && w.path != null) wells.add(w);
+		}
+		wells.sort(Comparator.comparingInt((PlateWell w) -> w.rowIndex == null ? 0 : w.rowIndex)
+				.thenComparingInt(w -> w.columnIndex == null ? 0 : w.columnIndex)
+				.thenComparing(w -> w.path));
+
+		final int nWells = hcs.limitWells(wells.size());
+		final List<ImageRef> refs = new ArrayList<>();
+		for (int w = 0; w < nWells; w++) {
+			final PlateWell well = wells.get(w);
+			final String wellPath = "/" + trimSlashes(well.path);
+			final WellMeta meta;
+			try {
+				meta = readWell(n5, wellPath, format);
+			} catch (final Exception e) {
+				log.warn("Skipping well {}: {}", well.path, e.getMessage());
+				continue;
+			}
+			if (meta == null || meta.images == null || meta.images.length == 0) {
+				log.warn("Skipping well {}: no \"well\" metadata / no images listed.", well.path);
+				continue;
+			}
+			final int row = well.rowIndex != null ? well.rowIndex : 0;
+			final int column = well.columnIndex != null ? well.columnIndex : 0;
+			final HcsCoords base = new HcsCoords(w, wellName(plate, well), row, column, 0);
+			final int nFields = hcs.limitFields(meta.images.length);
+			for (int f = 0; f < nFields; f++) {
+				final WellImage image = meta.images[f];
+				if (image == null || image.path == null) continue;
+				refs.add(new ImageRef(wellPath + "/" + trimSlashes(image.path), base.withField(f)));
+			}
+		}
+		if (refs.isEmpty()) {
+			throw new IllegalArgumentException(
+					"HCS plate \"" + plate.name + "\" yielded no readable field image.");
+		}
+		return refs;
+	}
+
+	/**
+	 * Parses the first field image that can be read, to stand in for every field of
+	 * the plate (see {@link HcsOptions}). The first field is normally the one used;
+	 * later ones are tried only if it is unreadable.
+	 */
+	private static ImageInfo parseTemplateImage(final N5Reader n5, final List<ImageRef> refs,
+			final StorageFormat format) {
+		Exception lastFailure = null;
+		for (final ImageRef ref : refs) {
+			try {
+				return parseImage(n5, ref.path, format);
+			} catch (final Exception e) {
+				log.warn("Field {} is not readable, trying the next one: {}", ref.path, e.getMessage());
+				lastFailure = e;
+			}
+		}
+		throw new IllegalArgumentException(
+				"No readable field image among the " + refs.size() + " listed by the plate metadata.",
+				lastFailure);
+	}
+
+	/** A plate's display name, falling back to the last path segment of the container. */
+	private static String plateName(final PlateMeta plate, final URI uri) {
+		if (plate.name != null && !plate.name.isEmpty()) return plate.name;
+		final String path = trimSlashes(uri.getPath() == null ? "" : uri.getPath());
+		final int slash = path.lastIndexOf('/');
+		final String last = slash < 0 ? path : path.substring(slash + 1);
+		return last.isEmpty() ? "plate" : last;
+	}
+
+	/**
+	 * A well's name, as row label + column label ({@code "C3"}). The plate's own
+	 * {@code rows}/{@code columns} labels are authoritative — they need not be
+	 * letters and digits — with the well's group path ({@code "C/3"}) as fallback.
+	 */
+	private static String wellName(final PlateMeta plate, final PlateWell well) {
+		final String row = label(plate.rows, well.rowIndex);
+		final String column = label(plate.columns, well.columnIndex);
+		if (row != null && column != null) return row + column;
+		return trimSlashes(well.path).replace("/", "");
+	}
+
+	private static String label(final PlateNamed[] entries, final Integer index) {
+		if (entries == null || index == null || index < 0 || index >= entries.length) return null;
+		final PlateNamed e = entries[index];
+		return (e == null || e.name == null || e.name.isEmpty()) ? null : e.name;
+	}
+
+	private static String trimSlashes(final String s) {
+		int from = 0;
+		int to = s.length();
+		while (from < to && s.charAt(from) == '/') from++;
+		while (to > from && s.charAt(to - 1) == '/') to--;
+		return s.substring(from, to);
+	}
+
+	/** One image to open: its group path, plus where it sits on a plate (or {@code null}). */
+	private static final class ImageRef {
+		final String path;
+		final HcsCoords hcs;
+
+		ImageRef(final String path, final HcsCoords hcs) {
+			this.path = path;
+			this.hcs = hcs;
+		}
+	}
+
+	/** Where a field image sits on its plate. */
+	private static final class HcsCoords {
+		final int wellId;
+		final String wellName;
+		final int row, column;
+		final int fieldId;
+
+		HcsCoords(final int wellId, final String wellName, final int row, final int column,
+				final int fieldId) {
+			this.wellId = wellId;
+			this.wellName = wellName;
+			this.row = row;
+			this.column = column;
+			this.fieldId = fieldId;
+		}
+
+		HcsCoords withField(final int field) {
+			return new HcsCoords(wellId, wellName, row, column, field);
+		}
 	}
 
 	/** Parses one multiscale image group into calibration + channel metadata. */
@@ -439,11 +683,13 @@ public class OmeZarrOpener {
 
 		// Per-level dataset paths and mipmap resolutions (relative to level 0).
 		final int nLevels = ms.datasets.length;
+		info.levelNames = new String[nLevels];
 		info.levelPaths = new String[nLevels];
 		info.mipmapResolutions = new double[nLevels][3];
 		final int[] spatialDims = { dimX, dimY, dimZ };
 		for (int l = 0; l < nLevels; l++) {
-			info.levelPaths[l] = path + "/" + ms.datasets[l].path;
+			info.levelNames[l] = ms.datasets[l].path;
+			info.levelPaths[l] = path + "/" + info.levelNames[l];
 			final double[] scaleL = level0Transform(ms.datasets[l], true);
 			for (int k = 0; k < 3; k++) {
 				// A 2D image (d < 0 for z) only downsamples in x/y: keep z at 1.
@@ -471,9 +717,40 @@ public class OmeZarrOpener {
 		FinalDimensions size;
 		VoxelDimensions voxel;
 		AffineTransform3D calibration;
+		/** dataset name of each resolution level, relative to {@link #path}. */
+		String[] levelNames;
 		String[] levelPaths;
 		double[][] mipmapResolutions;
 		Omero omero;
+
+		/**
+		 * This metadata, re-pointed at another image group. Used for the fields of an
+		 * HCS plate, which share their layout with the field this was parsed from (see
+		 * {@link HcsOptions}): only the group path differs, so only the per-level
+		 * dataset paths are rebuilt.
+		 */
+		ImageInfo copyFor(final String otherPath) {
+			final ImageInfo copy = new ImageInfo();
+			copy.path = otherPath;
+			copy.dimX = dimX;
+			copy.dimY = dimY;
+			copy.dimZ = dimZ;
+			copy.dimC = dimC;
+			copy.dimT = dimT;
+			copy.sizeC = sizeC;
+			copy.sizeT = sizeT;
+			copy.size = size;
+			copy.voxel = voxel;
+			copy.calibration = calibration.copy(); // each view registration gets its own
+			copy.levelNames = levelNames;
+			copy.levelPaths = new String[levelNames.length];
+			for (int l = 0; l < levelNames.length; l++) {
+				copy.levelPaths[l] = otherPath + "/" + levelNames[l];
+			}
+			copy.mipmapResolutions = mipmapResolutions;
+			copy.omero = omero;
+			return copy;
+		}
 	}
 
 	/**
@@ -552,6 +829,69 @@ public class OmeZarrOpener {
 			log.debug("No ome/omero: {}", e.getMessage());
 		}
 		return null;
+	}
+
+	/**
+	 * Reads the HCS {@code plate} block at the container root, or {@code null} when
+	 * the container is not a plate. v0.5 nests it under {@code ome}; v0.4 stores it
+	 * directly — the same split as {@code multiscales}, and, like it, keyed on the
+	 * storage format rather than tried both ways.
+	 * <p>
+	 * That matters during format detection: the Zarr-v3 reader will happily hand
+	 * back the root-level attributes of a Zarr-v2 container, so a lenient read here
+	 * would let a v0.4 plate be detected as v0.5 and every one of its field images
+	 * would then be looked up under the wrong nesting.
+	 * <p>
+	 * A plate without wells is treated as not-a-plate, so that an unusual container
+	 * still falls through to the ordinary multiscale probes rather than failing.
+	 */
+	private static PlateMeta readPlate(final N5Reader n5, final StorageFormat format) {
+		final String key = format == StorageFormat.ZARR ? "ome/plate" : "plate";
+		try {
+			final PlateMeta plate = n5.getAttribute(ROOT_GROUP, key, PlateMeta.class);
+			if (plate != null && plate.wells != null && plate.wells.length > 0) return plate;
+		} catch (final Exception e) {
+			log.debug("No {} attribute: {}", key, e.getMessage());
+		}
+		return null;
+	}
+
+	/** Reads a well group's {@code well} block (v0.5 under {@code ome}, v0.4 at the root). */
+	private static WellMeta readWell(final N5Reader n5, final String wellPath,
+			final StorageFormat format) {
+		final String key = format == StorageFormat.ZARR ? "ome/well" : "well";
+		final WellMeta well = n5.getAttribute(wellPath, key, WellMeta.class);
+		return (well != null && well.images != null) ? well : null;
+	}
+
+	/** Minimal deserialization view of the NGFF {@code plate} block. */
+	private static class PlateMeta {
+		String name;
+		PlateNamed[] rows;
+		PlateNamed[] columns;
+		PlateWell[] wells;
+	}
+
+	/** A {@code rows[]} / {@code columns[]} entry: only its label matters here. */
+	private static class PlateNamed {
+		String name;
+	}
+
+	/** A {@code wells[]} entry: the well group's path and its place on the plate. */
+	private static class PlateWell {
+		String path;      // e.g. "C/3"
+		Integer rowIndex;
+		Integer columnIndex;
+	}
+
+	/** Minimal deserialization view of a well group's {@code well} block. */
+	private static class WellMeta {
+		WellImage[] images;
+	}
+
+	/** An {@code images[]} entry of a well: the field image's path within the well. */
+	private static class WellImage {
+		String path;      // e.g. "0"
 	}
 
 	/**

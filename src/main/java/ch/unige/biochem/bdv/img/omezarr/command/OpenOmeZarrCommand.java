@@ -38,6 +38,11 @@ import org.scijava.plugin.Plugin;
  * A single URL field, in place of BigStitcher's multi-step dialog. The resulting
  * dataset is emitted as a command output; a {@code PostprocessorPlugin} (or
  * BigDataViewer-Playground) is responsible for displaying and registering it.
+ * <p>
+ * An HCS plate opens whole. Scripts that want only part of one can pass
+ * {@link ch.unige.biochem.bdv.img.omezarr.HcsOptions} to
+ * {@link OmeZarrOpener#open(String, ch.unige.biochem.bdv.img.omezarr.S3Options,
+ * ch.unige.biochem.bdv.img.omezarr.HcsOptions)} directly.
  */
 @Plugin(type = Command.class,
 		menuPath = "Plugins>BigDataViewer-Playground>Import>Dataset - Create [OME-Zarr]")
@@ -45,7 +50,7 @@ public class OpenOmeZarrCommand implements Command {
 
 	@Parameter(label = "OME-Zarr location (path or URL)",
 			description = "File path or URL (S3 / https) of an .ome.zarr container "
-					+ "whose root holds a multiscale image.")
+					+ "whose root holds a multiscale image or an HCS plate.")
 	String url;
 
 	@Parameter(type = ItemIO.OUTPUT)

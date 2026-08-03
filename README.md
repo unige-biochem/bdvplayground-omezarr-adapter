@@ -29,6 +29,7 @@ dataset-path / hyperslice metadata the loader consumes.
 | `omero` channels (`label`, `color`, `window`) | a `Displaysettings` entity (spimdata-extras: name + color + contrast) per `ViewSetup` |
 | `bioformats2raw` series (`0`, `1`, …) | one `Tile` per series, all in one dataset |
 | no `z` axis (2D image) | a single-slice volume (`z` size 1) — BDV sources are 3D |
+| HCS `plate` / `well` (field images) | a `Plate`, `Well` (name + row + column) and `Field` entity per `ViewSetup`, plus one `Tile` per field image |
 
 Reading `omero` display settings needs no dependency on BigDataViewer-Playground:
 the information is stored as a serializable SpimData entity, and Playground reads
@@ -46,9 +47,51 @@ it downstream to color the sources.
   BigDataViewer sources are inherently 3D, these are opened as **single-slice
   volumes**: `z` has size 1, voxel depth 1 and no calibration along `z`, and only
   `x`/`y` are downsampled across resolution levels.
+- **HCS plates** — a container whose root carries a `plate` attribute. See below.
 
 Both v0.4 (Zarr v2) and v0.5 (Zarr v3) are auto-detected. Remote URLs
 (`https://…`, S3) and local paths are accepted.
+
+### HCS plates
+
+Pass the plate container's URL and every field image of every well is opened as
+its own set of channel `ViewSetup`s, each tagged with a `Plate`, a `Well` (name,
+row and column) and a `Field` entity so downstream tools can group and filter the
+sources by their position on the plate. Wells come out in reading order (row,
+then column) and field ids restart in each well; `Tile` ids do not, so each field
+image stays a distinct group exactly as a `bioformats2raw` series does.
+
+Nothing is probed: the `plate` attribute names every well group and each well's
+`well` attribute names every field image, so discovery costs one small request
+per well.
+
+A plate is big, though — a 49-well plate with 32 fields and 5 channels is 1568
+field images and **7840 `ViewSetup`s**. Two things keep that workable:
+
+- **Fields are assumed uniform.** Every field of a plate comes from the same
+  acquisition, so one field's metadata (axes, dimensions, resolution levels,
+  channels, calibration) is read and reused for the whole plate. That turns
+  discovery from two HTTP round-trips per field into a constant three. A plate
+  whose fields genuinely differ needs `HcsOptions.strictPerField()`, which reads
+  every field and pays for it.
+- **Caps.** `HcsOptions.wells(n).fields(m)` opens only the first *n* wells and
+  the first *m* images of each — enough to look at a corner of a plate without
+  building thousands of sources. This is a scripting option; the Fiji commands
+  always open the whole plate.
+
+```java
+// the whole plate
+AbstractSpimData<?> plate = OmeZarrOpener.open(
+        "https://uk1s3.embassy.ebi.ac.uk/idr/zarr/v0.5/idr0090/190129.zarr");
+
+// just a corner of it
+AbstractSpimData<?> corner = OmeZarrOpener.open(
+        "https://uk1s3.embassy.ebi.ac.uk/idr/zarr/v0.5/idr0090/190129.zarr",
+        null, HcsOptions.wells(4).fields(2));
+```
+
+Most IDR plates are 2D (`c,y,x`), which is fine — they open as single-slice
+volumes like any other 2D image.
 
 ### S3 endpoints
 
@@ -78,6 +121,12 @@ The URI is stored verbatim (not relativized), so remote/S3 containers round-trip
 local containers are stored as absolute URIs. The pixel data itself is **not**
 exported — the XML always points back at the original OME-Zarr.
 
+For an HCS plate the `HcsOptions` caps are saved alongside the URI too. Capping
+discovery decides which field images exist and therefore which setup ids the XML
+refers to, so a plate opened with `wells(4).fields(2)` has to be re-discovered the
+same way — otherwise it would reload as the whole plate and the ids would no
+longer mean the same thing.
+
 For an `s3://` container the endpoint, region and addressing style are saved
 alongside the URI, since the URI alone does not say which store to talk to.
 **Credentials are never written** — a BDV XML is a shareable plain-text document.
@@ -86,7 +135,6 @@ have to be in place on whichever machine opens the XML.
 
 ### Not yet supported
 
-- HCS plates / wells
 - `labels` (segmentation) groups
 - Writing / export of pixel data (OME-Zarr is read-only; only the BDV XML is written)
 - Coordinate transformations beyond `scale` + `translation`
@@ -102,7 +150,8 @@ See [`PLAN.md`](PLAN.md) for the roadmap.
 
 The first command takes a single location field (path or URL); the second adds an
 S3 endpoint, region, addressing style and optional credentials. Both output an
-`AbstractSpimData`, which BigDataViewer-Playground displays and registers.
+`AbstractSpimData`, which BigDataViewer-Playground displays and registers, and
+both open an HCS plate whole — the `HcsOptions` caps are a scripting option.
 
 ## Scripting
 
