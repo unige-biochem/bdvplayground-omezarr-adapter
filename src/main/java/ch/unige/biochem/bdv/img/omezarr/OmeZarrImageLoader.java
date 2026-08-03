@@ -79,6 +79,7 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 
 	private final N5Properties properties;
 	private final Map<ViewId, HyperSlice> hyperSlices;
+	private final S3Options s3Options;
 
 	/**
 	 * @param reader      an already-opened reader on the container.
@@ -91,9 +92,38 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 	public OmeZarrImageLoader(final N5Reader reader, final URI uri,
 			final AbstractSequenceDescription<?, ?, ?> seq,
 			final N5Properties props, final Map<ViewId, HyperSlice> hyperSlices) {
+		this(reader, uri, seq, props, hyperSlices, null);
+	}
+
+	/**
+	 * @param reader      an already-opened reader on the container.
+	 * @param uri         the container URI.
+	 * @param seq         the sequence description.
+	 * @param props       the OME-Zarr metadata/path resolver.
+	 * @param hyperSlices per-{@code (timepoint,setup)} description of the reduction
+	 *                    from the stored array down to a 3D view.
+	 * @param s3Options   the S3 settings {@code reader} was opened with, kept so the
+	 *                    connection can be described in a saved BDV XML; {@code null}
+	 *                    for a local, {@code https://} or plain-AWS container.
+	 */
+	public OmeZarrImageLoader(final N5Reader reader, final URI uri,
+			final AbstractSequenceDescription<?, ?, ?> seq,
+			final N5Properties props, final Map<ViewId, HyperSlice> hyperSlices,
+			final S3Options s3Options) {
 		super(reader, uri, seq);
 		this.properties = props;
 		this.hyperSlices = hyperSlices;
+		this.s3Options = s3Options;
+	}
+
+	/**
+	 * The S3 settings this loader's container was opened with, or {@code null} if
+	 * none were needed. Pixels are served through the reader handed in at
+	 * construction, so this is metadata about the connection rather than state the
+	 * loader itself consults.
+	 */
+	public S3Options getS3Options() {
+		return s3Options;
 	}
 
 	@Override

@@ -83,7 +83,7 @@
 
 		<license.licenseName>mit</license.licenseName>
 		<license.copyrightOwners>Department of Biochemistry, University of Geneva</license.copyrightOwners>
-		<bigdataviewer-spimdata-extras.version>0.22.0</bigdataviewer-spimdata-extras.version>
+		<bigdataviewer-spimdata-extras.version>0.23.0-SNAPSHOT</bigdataviewer-spimdata-extras.version>
 
 		<reflections.version>0.10.2</reflections.version> <!-- for test only -->
 
@@ -122,6 +122,13 @@
 			<artifactId>n5-universe</artifactId>
 		</dependency>
 
+		<!-- Comes in transitively via n5-universe -> n5-aws-s3, but S3Options
+		     configures the S3ClientBuilder directly, so declare it explicitly.
+		     Version managed by pom-scijava. -->
+		<dependency>
+			<groupId>software.amazon.awssdk</groupId>
+			<artifactId>s3</artifactId>
+		</dependency>
 
 		<dependency>
 			<groupId>org.reflections</groupId>

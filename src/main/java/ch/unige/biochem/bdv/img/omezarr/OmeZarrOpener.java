@@ -61,6 +61,7 @@ import org.janelia.saalfeldlab.n5.universe.metadata.ome.ngff.coordinateTransform
 import org.janelia.saalfeldlab.n5.universe.metadata.ome.ngff.coordinateTransformations.TranslationCoordinateTransformation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.services.s3.S3ClientBuilder;
 
 import java.io.File;
 import java.net.URI;
@@ -69,6 +70,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * Builds a {@link SpimData} from an OME-Zarr (OME-NGFF v0.4 / v0.5) container,
@@ -111,11 +113,30 @@ public class OmeZarrOpener {
 	 * @return a {@link SpimData} backed by {@link OmeZarrImageLoader}.
 	 */
 	public static AbstractSpimData<?> open(final String uriString) {
+		return open(uriString, null);
+	}
+
+	/**
+	 * Opens an OME-Zarr container as a {@link SpimData}, with explicit S3 settings.
+	 * <p>
+	 * An {@code s3://bucket/key} URI carries no endpoint, so a container on an
+	 * object store that is not AWS needs {@code s3} to say where to connect (and,
+	 * for a private bucket, with which credentials).
+	 *
+	 * @param uriString file path or URL (S3/https/…) of the {@code .ome.zarr}
+	 *                  container whose root holds a multiscale image.
+	 * @param s3        S3 connection settings, or {@code null} for the defaults
+	 *                  n5-universe infers from the URI (which is all a plain
+	 *                  {@code https://} or local container needs).
+	 * @return a {@link SpimData} backed by {@link OmeZarrImageLoader}.
+	 */
+	public static AbstractSpimData<?> open(final String uriString, final S3Options s3) {
 		final URI uri = toUri(uriString);
-		final Parsed p = parse(uri);
+		final Parsed p = parse(uri, s3);
 		final SequenceDescription seq =
 				new SequenceDescription(new TimePoints(p.timePoints), p.setups, null, p.missingViews);
-		final OmeZarrImageLoader loader = new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices);
+		final OmeZarrImageLoader loader =
+				new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3);
 		seq.setImgLoader(loader);
 		return new SpimData(new File("."), seq, new ViewRegistrations(p.registrations));
 	}
@@ -134,9 +155,22 @@ public class OmeZarrOpener {
 	 */
 	public static OmeZarrImageLoader openLoader(final String uriString,
 			final AbstractSequenceDescription<?, ?, ?> seq) {
+		return openLoader(uriString, null, seq);
+	}
+
+	/**
+	 * As {@link #openLoader(String, AbstractSequenceDescription)}, with explicit S3
+	 * settings for a container on a non-AWS or private endpoint.
+	 *
+	 * @param uriString the container URI stored in the XML.
+	 * @param s3        S3 connection settings, or {@code null} for the defaults.
+	 * @param seq       the sequence description restored from the XML.
+	 */
+	public static OmeZarrImageLoader openLoader(final String uriString, final S3Options s3,
+			final AbstractSequenceDescription<?, ?, ?> seq) {
 		final URI uri = toUri(uriString);
-		final Parsed p = parse(uri);
-		return new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices);
+		final Parsed p = parse(uri, s3);
+		return new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3);
 	}
 
 	/** Everything discovery/parsing yields, shared by {@link #open} and {@link #openLoader}. */
@@ -155,16 +189,17 @@ public class OmeZarrOpener {
 	 * image into the {@link ViewSetup}s / {@link ViewRegistration}s and the
 	 * per-view path / hyperslice maps the loader consumes.
 	 */
-	private static Parsed parse(final URI uri) {
+	private static Parsed parse(final URI uri, final S3Options s3) {
 
 		// --- 1. Detect the storage format ------------------------------------
 		// OME-NGFF v0.5 is Zarr v3 (StorageFormat.ZARR); v0.4 is Zarr v2 (ZARR2).
 		// A URL may point at a single image, OR at a bioformats2raw container
 		// whose images are child groups "0", "1", ... (no multiscales at root).
 		StorageFormat format = null;
+		Exception lastFailure = null;
 		for (final StorageFormat candidate : new StorageFormat[] { StorageFormat.ZARR, StorageFormat.ZARR2 }) {
 			try {
-				final N5Reader probe = openReader(candidate, uri);
+				final N5Reader probe = openReader(candidate, uri, s3);
 				if (readMultiscale(probe, ROOT_GROUP, candidate) != null
 						|| readMultiscale(probe, "/0", candidate) != null) {
 					format = candidate;
@@ -172,17 +207,27 @@ public class OmeZarrOpener {
 				}
 			} catch (final Exception e) {
 				log.debug("Not readable as {}: {}", candidate, e.getMessage());
+				lastFailure = e;
 			}
 		}
 		if (format == null) {
+			// Both probes came up empty. That is usually a layout we don't support,
+			// but it is also what a connection problem looks like from here — an
+			// s3:// URI without an endpoint, say — so carry the last failure as the
+			// cause rather than reporting only the layout diagnosis.
 			throw new IllegalArgumentException(
 					"No OME-NGFF multiscale metadata found at " + uri + " or its child \"0\". " +
 					"If this is an HCS plate or an unusual layout it is not yet supported; " +
-					"otherwise point at the image group directly.");
+					"otherwise point at the image group directly." +
+					(uri.getScheme() != null && uri.getScheme().equalsIgnoreCase("s3") && s3 == null
+							? " Note that an s3:// URI carries no endpoint: for a store that is not"
+							+ " AWS, open it with S3 settings (see the [OME-Zarr on S3] command)."
+							: ""),
+					lastFailure);
 		}
 
 		// --- 2. Discover the image group(s) inside the container -------------
-		final N5Reader n5 = openReader(format, uri);
+		final N5Reader n5 = openReader(format, uri, s3);
 		final List<String> imagePaths = discoverImagePaths(n5, format);
 		final boolean multiImage = imagePaths.size() > 1;
 		log.info("Opened {} as {}: {} image(s) at {}", uri, format, imagePaths.size(), imagePaths);
@@ -280,11 +325,20 @@ public class OmeZarrOpener {
 	 * coordinate-transformation Gson adapter registered so that {@code scale} /
 	 * {@code translation} deserialize. {@link StorageFormat#ZARR} = Zarr v3
 	 * (NGFF 0.5), {@link StorageFormat#ZARR2} = Zarr v2 (NGFF 0.4).
+	 * <p>
+	 * {@code s3} (when given) configures the S3 client for {@code s3://} URIs; it
+	 * is inert for local and {@code https://} containers, which n5 reads without
+	 * an S3 client at all.
 	 */
-	private static N5Reader openReader(final StorageFormat format, final URI uri) {
+	private static N5Reader openReader(final StorageFormat format, final URI uri, final S3Options s3) {
 		final GsonBuilder gson = new GsonBuilder().registerTypeAdapter(
 				CoordinateTransformation.class, new CoordinateTransformationAdapter());
-		return new N5Factory().gsonBuilder(gson).openReader(format, uri);
+		final N5Factory factory = new N5Factory().gsonBuilder(gson);
+		final Consumer<S3ClientBuilder> s3Config = s3 == null ? null : s3.asBuilderConfig();
+		if (s3Config != null) {
+			factory.s3Configuration(s3Config);
+		}
+		return factory.openReader(format, uri);
 	}
 
 	/**

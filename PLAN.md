@@ -57,6 +57,8 @@ series discovery; writing/export.
 |---|---|
 | `bdv/img/omezarr/OmeZarrOpener.java` | Discovery + `SpimData` builder (the metadata layer). `open(String uri, ...)`. |
 | `bdv/img/omezarr/command/OpenOmeZarrCommand.java` | SciJava `Command`: URL field → outputs `AbstractSpimData`. |
+| `bdv/img/omezarr/command/OpenOmeZarrS3Command.java` | SciJava `Command`: `s3://` URI + endpoint + optional credentials. |
+| `bdv/img/omezarr/S3Options.java` | S3 endpoint / region / addressing style / credentials, applied via `N5Factory.s3Configuration`. |
 | `SpimDataPostprocessor` (already present, test) | Auto-shows any `AbstractSpimData` command output in BDV. |
 | `OpenOmeZarrDemo` (test) | Smoke test against a public OME-Zarr. |
 
@@ -108,13 +110,30 @@ series discovery; writing/export.
     native blosc is missing, so the default build stays green offline.
 
 - [x] **XML round-trip (`XmlIo`)** — `XmlIoOmeZarrImageLoader`
-  (`@ImgLoaderIo(format = "bdv.omezarr")`) saves/reloads an OME-Zarr-backed
+  (`@ImgLoaderIo(format = "ch.unige.bdv.omezarr")`) saves/reloads an OME-Zarr-backed
   SpimData as a BDV XML (BigStitcher/BigWarp interop). It persists only the
   container URI and re-runs discovery on load via `OmeZarrOpener.openLoader`
   (like `XmlIoN5ImageLoader` re-opens its store), rather than persisting the whole
   view→entry map. Covered by `XmlIoOmeZarrRoundTripIT` (open → save → reload →
   pixel load). The URI is stored verbatim (not relativized), so remote/S3
-  containers round-trip; local containers are stored as absolute URIs.
+  containers round-trip; local containers are stored as absolute URIs. For an
+  `s3://` container the endpoint / region / addressing style ride along (the URI
+  alone does not identify the store); credentials never do.
+
+- [x] **S3 endpoints + credentials** (`S3Options`, `OpenOmeZarrS3Command`). An
+  `s3://bucket/key` URI carries no endpoint, so the AWS SDK resolves it against
+  Amazon and a container on any other S3-speaking store (EBI Embassy, Ceph,
+  MinIO) is simply not found — which surfaced as the generic "no multiscale
+  metadata" error. `S3Options` supplies endpoint / region / addressing style /
+  optional key pair through `N5Factory.s3Configuration(Consumer<S3ClientBuilder>)`,
+  which n5 applies *after* its own defaults, so each field wins. With no key pair
+  it sets no credentials provider at all, preserving n5's anonymous-then-AWS-
+  default-chain fallback (`AmazonS3Utils.createS3` compares the provider by
+  identity to decide). The XML persists the connection but **never the secret**;
+  `parse` now also chains the underlying failure as the cause and, for a bare
+  `s3://`, names the missing endpoint. Covered by `S3OptionsTest` (offline, drives
+  a real `S3ClientBuilder`) and `OmeZarrS3IT` (opens IDR over `s3://` and asserts
+  metadata parity with the `https://` open of the same container).
 
 ## Next
 

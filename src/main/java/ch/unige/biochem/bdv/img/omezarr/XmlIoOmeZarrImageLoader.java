@@ -10,10 +10,10 @@
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
+ * 
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *
+ * 
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -51,15 +51,33 @@ import java.io.File;
  * The URI is stored verbatim (not relativized against the XML's base path), so
  * remote containers ({@code https://}, S3) round-trip correctly. Local containers
  * are therefore stored as absolute URIs.
+ * <p>
+ * For an {@code s3://} container the {@link S3Options} endpoint / region /
+ * addressing style are persisted alongside the URI, since an {@code s3://} URI on
+ * its own does not say which object store to talk to.
+ * <b>Credentials are deliberately not written</b> — a BDV XML is a shareable
+ * plain-text document. A private bucket therefore reloads through the AWS default
+ * credential chain ({@code AWS_ACCESS_KEY_ID}/{@code AWS_SECRET_ACCESS_KEY},
+ * {@code ~/.aws/credentials}, instance profile, …), which must be in place on
+ * whichever machine opens the XML.
  */
 @ImgLoaderIo(format = XmlIoOmeZarrImageLoader.FORMAT, type = OmeZarrImageLoader.class)
 public class XmlIoOmeZarrImageLoader implements XmlIoBasicImgLoader<OmeZarrImageLoader> {
 
 	/** Unique format id written to the {@code ImageLoader/@format} attribute. */
-	public static final String FORMAT = "bdv.omezarr";
+	public static final String FORMAT = "ch.unige.bdv.omezarr";
 
 	/** Child element holding the container URI. */
 	private static final String URI_TAG = "zarr";
+
+	/** Child element holding the S3 endpoint URL, absent unless one was needed. */
+	private static final String S3_ENDPOINT_TAG = "s3endpoint";
+
+	/** Child element holding the S3 region, absent unless one was given. */
+	private static final String S3_REGION_TAG = "s3region";
+
+	/** Child element holding the S3 addressing style ({@code true} = path style). */
+	private static final String S3_PATH_STYLE_TAG = "s3pathstyle";
 
 	@Override
 	public Element toXml(final OmeZarrImageLoader imgLoader, final File basePath) {
@@ -67,6 +85,19 @@ public class XmlIoOmeZarrImageLoader implements XmlIoBasicImgLoader<OmeZarrImage
 		elem.setAttribute(IMGLOADER_FORMAT_ATTRIBUTE_NAME, FORMAT);
 		elem.setAttribute("version", "1.0");
 		elem.addContent(XmlHelpers.textElement(URI_TAG, imgLoader.getN5URI().toString()));
+
+		// Only the connection settings, never the secret (see the class javadoc).
+		final S3Options s3 = imgLoader.getS3Options();
+		if (s3 != null && !s3.withoutCredentials().isEmpty()) {
+			if (s3.getEndpoint() != null) {
+				elem.addContent(XmlHelpers.textElement(S3_ENDPOINT_TAG, s3.getEndpoint()));
+			}
+			if (s3.getRegion() != null) {
+				elem.addContent(XmlHelpers.textElement(S3_REGION_TAG, s3.getRegion()));
+			}
+			elem.addContent(XmlHelpers.textElement(
+					S3_PATH_STYLE_TAG, Boolean.toString(s3.isPathStyle())));
+		}
 		return elem;
 	}
 
@@ -74,6 +105,19 @@ public class XmlIoOmeZarrImageLoader implements XmlIoBasicImgLoader<OmeZarrImage
 	public OmeZarrImageLoader fromXml(final Element elem, final File basePath,
 			final AbstractSequenceDescription<?, ?, ?> sequenceDescription) {
 		final String uri = XmlHelpers.getText(elem, URI_TAG);
-		return OmeZarrOpener.openLoader(uri, sequenceDescription);
+		return OmeZarrOpener.openLoader(uri, s3OptionsFromXml(elem), sequenceDescription);
+	}
+
+	/**
+	 * Rebuilds the connection settings, without credentials — an XML written before
+	 * S3 support, or for a non-S3 container, simply has none of these elements and
+	 * yields {@code null}.
+	 */
+	static S3Options s3OptionsFromXml(final Element elem) {
+		final String endpoint = XmlHelpers.getText(elem, S3_ENDPOINT_TAG, null);
+		final String region = XmlHelpers.getText(elem, S3_REGION_TAG, null);
+		final String pathStyle = XmlHelpers.getText(elem, S3_PATH_STYLE_TAG, null);
+		if (endpoint == null && region == null && pathStyle == null) return null;
+		return new S3Options(endpoint, region, Boolean.parseBoolean(pathStyle), null, null);
 	}
 }
