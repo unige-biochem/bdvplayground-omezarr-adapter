@@ -30,10 +30,30 @@ dataset-path / hyperslice metadata the loader consumes.
 | `bioformats2raw` series (`0`, `1`, …) | one `Tile` per series, all in one dataset |
 | no `z` axis (2D image) | a single-slice volume (`z` size 1) — BDV sources are 3D |
 | HCS `plate` / `well` (field images) | a `Plate`, `Well` (name + row + column) and `Field` entity per `ViewSetup`, plus one `Tile` per field image |
+| the image a setup came from | an `ImageName` entity, the same one on all channels of that image |
 
 Reading `omero` display settings needs no dependency on BigDataViewer-Playground:
 the information is stored as a serializable SpimData entity, and Playground reads
 it downstream to color the sources.
+
+### Image names
+
+Every `ViewSetup` carries an `ImageName` entity, shared by all the channels of one
+image, so downstream tools can tell which setups belong together. Its name is
+taken from the best source the container offers, in order:
+
+1. the field's position on the plate (`C3 - f0`), for an HCS plate;
+2. the `multiscales` `name`, when the container states a usable one — in practice
+   a `bioformats2raw` container, which records the name of the series it was
+   converted from (`14002892`). The field is optional in OME-NGFF and most writers
+   skip it (the IDR's `omero-zarr` exports have none), while `ome-zarr-py` and the
+   ome2024-ngff-challenge converter fill it with `"/"`, which names nothing — such
+   values are rejected rather than surfaced;
+3. `s0`, `s1`, … for an image in a multi-image container without a stored name;
+4. the container's own name, for a lone image at the root.
+
+What identifies an image is the entity's **id** (the image index), not the string:
+SpimData entities compare by id alone. The name is for display.
 
 ## Supported layouts
 
@@ -130,8 +150,9 @@ a dataset opened by another importer.
 That last step is needed because BigStitcher will not fuse tiles whose entities
 differ, even for an entity that has nothing to do with the grouping — and
 `Displaysettings` differs per setup by construction, since it carries that
-channel's own color and contrast. `Plate`, `Well` and `Field` are kept, as the
-Bio-Formats importer keeps them.
+channel's own color and contrast. `Plate`, `Well`, `Field` and `ImageName` are
+kept: they vary per image, not per channel, which is the same granularity as the
+`Tile` that BigStitcher groups on — and the Bio-Formats importer keeps them too.
 
 When scripting, the default is `WorldUnit.AS_STORED` — `OmeZarrOpener.open(uri)`
 keeps the file's own unit, which is the only lossless choice:

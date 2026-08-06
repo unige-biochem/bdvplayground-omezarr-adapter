@@ -50,6 +50,7 @@ import net.imglib2.realtransform.AffineTransform3D;
 import spimdata.SpimDataHelper;
 import spimdata.util.Displaysettings;
 import spimdata.util.Field;
+import spimdata.util.ImageName;
 import spimdata.util.Plate;
 import spimdata.util.Well;
 import org.janelia.saalfeldlab.n5.N5Reader;
@@ -94,6 +95,12 @@ import java.util.function.Consumer;
  * {@code omero} block and attached as a {@link Displaysettings} entity per
  * {@link ViewSetup}, so BigDataViewer-Playground can apply them without this
  * library depending on it.
+ * <p>
+ * All channels of one image share a single {@link ImageName} entity, which is
+ * what identifies "the same image" across its setups. Its name comes from the
+ * plate position, the stored {@code multiscales} name or the container, in that
+ * order (see {@code imageName}), since OME-NGFF only optionally names an image
+ * and several writers do not.
  * <p>
  * Supports a single image at the container root, a {@code bioformats2raw}
  * container whose images are integer-named child groups ({@code 0, 1, …})
@@ -377,19 +384,25 @@ public class OmeZarrOpener {
 			final HcsCoords coords = refs.get(s).hcs;
 			final ImageEntry entry = new ImageEntry(
 					img.levelPaths, img.mipmapResolutions, img.dimX, img.dimY, img.dimZ);
+
+			// One shared name entity per image, so all of an image's channels carry
+			// the same ImageName and downstream tools can group them by it. The id is
+			// the image index: unique, and deterministic in the way openLoader()'s
+			// re-discovery requires — the name string itself is only cosmetic, since
+			// entity equality is on the id alone.
+			final String imgName = imageName(img, coords, uri, s, multiImage);
+			final ImageName imageNameEntity = new ImageName(s, imgName);
+
 			for (int c = 0; c < img.sizeC; c++) {
 				final OmeroChannel oc = (img.omero != null && img.omero.channels != null
 						&& c < img.omero.channels.length) ? img.omero.channels[c] : null;
 				final String channelLabel = (oc != null && oc.label != null && !oc.label.isEmpty())
 						? oc.label : "channel " + c;
-				final String setupName;
-				if (coords != null) {
-					setupName = coords.wellName + " - f" + coords.fieldId + " - " + channelLabel;
-				} else if (multiImage) {
-					setupName = "s" + s + " - " + channelLabel;
-				} else {
-					setupName = channelLabel;
-				}
+				// A lone image needs no prefix: its channel labels already tell its
+				// setups apart. Several images in one container do.
+				final String setupName = (coords != null || multiImage)
+						? imgName + " - " + channelLabel
+						: channelLabel;
 
 				final ViewSetup vs = new ViewSetup(
 						setupId,
@@ -400,6 +413,8 @@ public class OmeZarrOpener {
 						new Channel(c, channelLabel),
 						new Angle(0),
 						new Illumination(0));
+
+				vs.setAttribute(imageNameEntity);
 
 				// Plate / well / field entities (spimdata-extras), so downstream tools
 				// can group and filter the sources by their position on the plate.
@@ -595,10 +610,66 @@ public class OmeZarrOpener {
 	/** A plate's display name, falling back to the last path segment of the container. */
 	private static String plateName(final PlateMeta plate, final URI uri) {
 		if (plate.name != null && !plate.name.isEmpty()) return plate.name;
+		final String container = containerName(uri);
+		return container.isEmpty() ? "plate" : container;
+	}
+
+	/**
+	 * The container's own name: the last path segment of its URI, without the
+	 * {@code .ome.zarr} / {@code .zarr} extension.
+	 */
+	private static String containerName(final URI uri) {
 		final String path = trimSlashes(uri.getPath() == null ? "" : uri.getPath());
 		final int slash = path.lastIndexOf('/');
-		final String last = slash < 0 ? path : path.substring(slash + 1);
-		return last.isEmpty() ? "plate" : last;
+		String name = slash < 0 ? path : path.substring(slash + 1);
+		if (name.toLowerCase().endsWith(".zarr")) {
+			name = name.substring(0, name.length() - ".zarr".length());
+		}
+		if (name.toLowerCase().endsWith(".ome")) {
+			name = name.substring(0, name.length() - ".ome".length());
+		}
+		return name;
+	}
+
+	/**
+	 * The name shared by all channels of one image, best source first:
+	 * <ol>
+	 * <li>its position on the plate ({@code "C3 - f0"}) &mdash; for a field image
+	 *     that is both the most useful name and the only one guaranteed to be
+	 *     unique, since the fields of a plate are read from one template and would
+	 *     otherwise all report the same stored name;</li>
+	 * <li>the {@code multiscales} {@code name}, when the container states a usable
+	 *     one (see {@link #usableName}) &mdash; in practice that means a
+	 *     {@code bioformats2raw} container, which carries the name of the series it
+	 *     was converted from;</li>
+	 * <li>{@code "s<i>"}, the image's index in a multi-image container;</li>
+	 * <li>the container's own name, for a lone image at the root.</li>
+	 * </ol>
+	 */
+	private static String imageName(final ImageInfo img, final HcsCoords coords, final URI uri,
+			final int index, final boolean multiImage) {
+		if (coords != null) return coords.wellName + " - f" + coords.fieldId;
+		if (img.name != null) return img.name;
+		if (multiImage) return "s" + index;
+		final String container = containerName(uri);
+		return container.isEmpty() ? "image" : container;
+	}
+
+	/**
+	 * The {@code multiscales} {@code name} if it identifies the image, else
+	 * {@code null}. The field is optional in OME-NGFF and most writers skip it (the
+	 * IDR's {@code omero-zarr} exports have none at all), while others fill it with
+	 * the group path &mdash; {@code ome-zarr-py} and the ome2024-ngff-challenge
+	 * converter write {@code "/"}, which names nothing. Only {@code bioformats2raw}
+	 * reliably puts something meaningful there, so anything that is blank or made of
+	 * path punctuation is rejected rather than surfaced as an image name.
+	 */
+	private static String usableName(final String name) {
+		if (name == null) return null;
+		final String trimmed = name.trim();
+		if (trimmed.isEmpty()) return null;
+		if (trimmed.replace("/", "").replace(".", "").isEmpty()) return null;
+		return trimmed;
 	}
 
 	/**
@@ -752,6 +823,7 @@ public class OmeZarrOpener {
 
 		final ImageInfo info = new ImageInfo();
 		info.path = path;
+		info.name = usableName(ms.name);
 		info.dimX = dimX;
 		info.dimY = dimY;
 		info.dimZ = dimZ;
@@ -802,8 +874,9 @@ public class OmeZarrOpener {
 
 		info.omero = readOmero(n5, path);
 
-		log.info("  image {}: {}, {} channel(s), {} timepoint(s), {} level(s), voxel [{}, {}, {}] {}",
-				path, dimZ >= 0 ? "3D" : "2D (single z slice)",
+		log.info("  image {}{}: {}, {} channel(s), {} timepoint(s), {} level(s), voxel [{}, {}, {}] {}",
+				path, info.name != null ? " \"" + info.name + "\"" : "",
+				dimZ >= 0 ? "3D" : "2D (single z slice)",
 				info.sizeC, info.sizeT, nLevels, sx, sy, sz, unit);
 		return info;
 	}
@@ -811,6 +884,8 @@ public class OmeZarrOpener {
 	/** Per-image parsed metadata used to assemble the SpimData. */
 	private static class ImageInfo {
 		String path;
+		/** The image's stored {@code multiscales} name, or {@code null} if unusable. */
+		String name;
 		/** imglib2 dim of each axis, or -1 when the image has no such axis. */
 		int dimX, dimY, dimZ, dimC, dimT;
 		int sizeC, sizeT;
@@ -847,6 +922,9 @@ public class OmeZarrOpener {
 		ImageInfo copyFor(final String otherPath) {
 			final ImageInfo copy = new ImageInfo();
 			copy.path = otherPath;
+			// name is deliberately not copied: it belongs to the field it was parsed
+			// from, and reusing it would give every field of the plate the same name.
+			// Field images are named after their well and field anyway (see imageName).
 			copy.dimX = dimX;
 			copy.dimY = dimY;
 			copy.dimZ = dimZ;

@@ -36,6 +36,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import spimdata.util.Displaysettings;
+import spimdata.util.ImageName;
 
 import java.io.File;
 import java.net.HttpURLConnection;
@@ -121,6 +122,10 @@ public class XmlIoOmeZarrRoundTripIT {
 			assertArrayEquals("color[" + i + "]",
 					a.getAttribute(Displaysettings.class).color,
 					b.getAttribute(Displaysettings.class).color);
+			// So does the image name, which is what ties an image's channels together.
+			assertEquals("image name[" + i + "]",
+					a.getAttribute(ImageName.class).getName(),
+					b.getAttribute(ImageName.class).getName());
 		}
 
 		// --- the re-discovered loader must actually serve pixels ---

@@ -40,6 +40,7 @@ import net.imglib2.RandomAccessibleInterval;
 import org.junit.Assume;
 import org.junit.Test;
 import spimdata.util.Displaysettings;
+import spimdata.util.ImageName;
 
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -133,6 +134,11 @@ public class OmeZarrOpenerIT {
 		assertEquals("Dapi", dapi.getName());
 		assertArrayEquals(new int[] { 255, 255, 0, 255 }, // yellow
 				dapi.getAttribute(Displaysettings.class).color);
+
+		// This container states no multiscales name, so the image falls back to the
+		// container's own name — the same entity for both channels.
+		assertEquals("6001240", lamin.getAttribute(ImageName.class).getName());
+		assertEquals(lamin.getAttribute(ImageName.class), dapi.getAttribute(ImageName.class));
 
 		// Pure scale, no translation.
 		assertArrayEquals(new double[] { 0, 0, 0 }, translation(sd, 0, 0), EPS);
@@ -256,6 +262,9 @@ public class OmeZarrOpenerIT {
 
 		final ViewSetup vs = (ViewSetup) setups.get(0);
 		assertEquals("Cy3", vs.getName());
+		// This container names its multiscale "/", which identifies nothing: the
+		// image name falls back to the container's own name.
+		assertEquals("ExpD_chicken_embryo_MIP", vs.getAttribute(ImageName.class).getName());
 		assertArrayEquals("2D image gets a singleton z", new long[] { 6510, 8978, 1 }, sizeXYZ(vs));
 		assertEquals(1.6, vs.getVoxelSize().dimension(0), EPS);
 		assertEquals(1.6, vs.getVoxelSize().dimension(1), EPS);
@@ -314,17 +323,28 @@ public class OmeZarrOpenerIT {
 		final List<? extends BasicViewSetup> setups = setups(sd);
 		assertEquals("9 series x 5 channels", 45, setups.size());
 
+		// bioformats2raw records the converted series name in "multiscales.name",
+		// so the setups are named after it rather than after the series index.
 		final ViewSetup first = (ViewSetup) setups.get(0);
-		assertEquals("s0 - Nuclei", first.getName());
+		assertEquals("14002892 - Nuclei", first.getName());
+		assertEquals("14002892", first.getAttribute(ImageName.class).getName());
 		assertEquals(0, first.getAttribute(Tile.class).getId());
 		assertArrayEquals(new long[] { 2080, 1552, 1 }, sizeXYZ(first));
 		assertEquals(0.3, first.getVoxelSize().dimension(0), EPS);
 		assertEquals(1.0, first.getVoxelSize().dimension(2), EPS);
 		assertEquals("micrometer", first.getVoxelSize().unit());
 
+		// All five channels of a series share one ImageName, by id and by name.
+		for (int c = 0; c < 5; c++) {
+			assertEquals("ImageName of channel " + c,
+					first.getAttribute(ImageName.class),
+					((ViewSetup) setups.get(c)).getAttribute(ImageName.class));
+		}
+
 		// Series are grouped by Tile; the 6th setup starts series 1.
 		final ViewSetup secondSeries = (ViewSetup) setups.get(5);
-		assertEquals("s1 - Nuclei", secondSeries.getName());
+		assertEquals("14002893 - Nuclei", secondSeries.getName());
+		assertEquals(1, secondSeries.getAttribute(ImageName.class).getId());
 		assertEquals(1, secondSeries.getAttribute(Tile.class).getId());
 		assertEquals("channel restarts per series",
 				0, secondSeries.getAttribute(Channel.class).getId());

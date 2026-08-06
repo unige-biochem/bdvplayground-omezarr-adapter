@@ -41,6 +41,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import spimdata.util.Displaysettings;
 import spimdata.util.Field;
+import spimdata.util.ImageName;
 import spimdata.util.Plate;
 import spimdata.util.Well;
 
@@ -152,6 +153,9 @@ public class OmeZarrHcsIT {
 		assertEquals("B2 - f0 - DNA", dna.getName());
 		assertEquals(1, dna.getAttribute(Channel.class).getId());
 		assertEquals("same field image, so same tile", 0, dna.getAttribute(Tile.class).getId());
+		assertEquals("same field image, so same image name",
+				first.getAttribute(ImageName.class), dna.getAttribute(ImageName.class));
+		assertEquals("B2 - f0", dna.getAttribute(ImageName.class).getName());
 		assertEquals(0, dna.getAttribute(Field.class).getId());
 		assertArrayEquals(new int[] { 0, 0, 255, 255 }, // DNA is blue
 				dna.getAttribute(Displaysettings.class).color);
@@ -310,6 +314,13 @@ public class OmeZarrHcsIT {
 			final Plate plate = b.getAttribute(Plate.class);
 			assertNotNull("plate entity survived[" + i + "]", plate);
 			assertEquals("plate name[" + i + "]", a.getAttribute(Plate.class).getName(), plate.getName());
+
+			final ImageName imageName = b.getAttribute(ImageName.class);
+			assertNotNull("image name entity survived[" + i + "]", imageName);
+			assertEquals("image name[" + i + "]",
+					a.getAttribute(ImageName.class).getName(), imageName.getName());
+			assertEquals("image name id[" + i + "]",
+					a.getAttribute(ImageName.class).getId(), imageName.getId());
 
 			final Well well = b.getAttribute(Well.class);
 			assertNotNull("well entity survived[" + i + "]", well);
