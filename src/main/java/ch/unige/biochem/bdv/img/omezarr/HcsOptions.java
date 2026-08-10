@@ -41,6 +41,11 @@ package ch.unige.biochem.bdv.img.omezarr;
  * mis-sized by that assumption; {@link #strictPerField()} turns it off and reads
  * every field, at the cost of the round-trips.
  * <p>
+ * The uniform-field shortcut covers the acquisition layout only. Which
+ * <em>label</em> images a field carries is always read per field, since
+ * segmenting part of a plate is normal and assuming otherwise would invent
+ * sources that do not exist.
+ * <p>
  * <b>Caps.</b> {@link #wells(int)} and {@link #fields(int)} open only the first
  * <em>n</em> wells (in row/column order) and the first <em>n</em> images of each
  * well — enough to look at a corner of a plate without building thousands of

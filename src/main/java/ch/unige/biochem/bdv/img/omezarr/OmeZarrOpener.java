@@ -111,7 +111,15 @@ import java.util.function.Consumer;
  * plate is opened, and how carefully). Each image needs axes {@code (y,x)},
  * optionally {@code z}, plus optional {@code c} and {@code t}; a 2D image (no
  * {@code z}) is presented as a single-slice volume, since BigDataViewer sources
- * are 3D. {@code labels} groups are out of scope for now (see {@code PLAN.md}).
+ * are 3D.
+ * <p>
+ * An image may also carry <b>label images</b> (segmentations) in a {@code labels}
+ * subgroup. Opening them is <b>opt-in</b>: merely finding out whether an image has
+ * any costs one attribute read per image, which is nothing for a single image and
+ * 1568 extra round-trips for a plate. When enabled, each registered label image
+ * becomes extra {@link ViewSetup}s on its source image's {@link Tile}, sharing that
+ * image's {@link ImageName} so the two stay grouped, and flagged
+ * {@link Displaysettings#isLabelImage} for renderers to pick up.
  */
 public class OmeZarrOpener {
 
@@ -122,6 +130,30 @@ public class OmeZarrOpener {
 
 	/** Safety cap when probing bioformats2raw series "0", "1", … over HTTP. */
 	private static final int MAX_SERIES = 100_000;
+
+	/** Subgroup of an image group that holds its label images. */
+	private static final String LABELS_GROUP = "labels";
+
+	/**
+	 * LUT name attached to a label setup. Label values are object indices, not
+	 * intensities, so a categorical LUT is what makes them readable; resolving the
+	 * name to actual colors is the renderer's job (spimdata-extras deliberately
+	 * depends on no LUT provider).
+	 */
+	private static final String LABEL_LUT = "glasbey_on_dark";
+
+	/**
+	 * Fallback color for a label setup, for a renderer that does not resolve
+	 * {@link Displaysettings#lutName}. Cloned per setup — {@code Displaysettings.color}
+	 * is a mutable array that whoever holds it may write to.
+	 */
+	private static final int[] LABEL_COLOR = { 255, 255, 255, 255 };
+
+	/**
+	 * Projection mode for a label setup. Summing object indices along z is
+	 * meaningless; averaging at least keeps them in range.
+	 */
+	private static final String LABEL_PROJECTION_MODE = "Avg";
 
 	private OmeZarrOpener() {}
 
@@ -189,14 +221,37 @@ public class OmeZarrOpener {
 	 */
 	public static AbstractSpimData<?> open(final String uriString, final S3Options s3,
 			final HcsOptions hcs, final WorldUnit unit) {
+		return open(uriString, s3, hcs, unit, false);
+	}
+
+	/**
+	 * Opens an OME-Zarr container as a {@link SpimData}, with explicit S3, HCS,
+	 * world-unit and label settings.
+	 *
+	 * @param uriString file path or URL (S3/https/…) of the {@code .ome.zarr}
+	 *                  container whose root holds a multiscale image or a
+	 *                  {@code plate}.
+	 * @param s3        S3 connection settings, or {@code null} for the defaults.
+	 * @param hcs       how much of an HCS plate to open, or {@code null} for
+	 *                  {@link HcsOptions#DEFAULT}.
+	 * @param unit      the unit to express voxel sizes and registrations in, or
+	 *                  {@code null} for {@link WorldUnit#AS_STORED}.
+	 * @param labels    whether to also open the label images each image registers in
+	 *                  its {@code labels} group. Off by default: probing for them
+	 *                  costs an attribute read per image, and not every workflow
+	 *                  wants segmentations as sources.
+	 * @return a {@link SpimData} backed by {@link OmeZarrImageLoader}.
+	 */
+	public static AbstractSpimData<?> open(final String uriString, final S3Options s3,
+			final HcsOptions hcs, final WorldUnit unit, final boolean labels) {
 		final URI uri = toUri(uriString);
 		final HcsOptions opts = hcs != null ? hcs : HcsOptions.DEFAULT;
 		final WorldUnit world = unit != null ? unit : WorldUnit.AS_STORED;
-		final Parsed p = parse(uri, s3, opts, world);
+		final Parsed p = parse(uri, s3, opts, world, labels);
 		final SequenceDescription seq =
 				new SequenceDescription(new TimePoints(p.timePoints), p.setups, null, p.missingViews);
 		final OmeZarrImageLoader loader =
-				new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3, opts);
+				new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3, opts, labels);
 		seq.setImgLoader(loader);
 		final SpimData spimData = new SpimData(new File("."), seq, new ViewRegistrations(p.registrations));
 
@@ -260,12 +315,34 @@ public class OmeZarrOpener {
 	 */
 	public static OmeZarrImageLoader openLoader(final String uriString, final S3Options s3,
 			final HcsOptions hcs, final AbstractSequenceDescription<?, ?, ?> seq) {
+		return openLoader(uriString, s3, hcs, false, seq);
+	}
+
+	/**
+	 * As {@link #openLoader(String, S3Options, HcsOptions, AbstractSequenceDescription)},
+	 * with an explicit label setting.
+	 * <p>
+	 * Like the HCS caps, this has to be what the dataset was originally opened with:
+	 * label images contribute their own setups, so a dataset saved with them and
+	 * reloaded without would shift every setup id after the first label.
+	 * {@link XmlIoOmeZarrImageLoader} persists it for that reason.
+	 *
+	 * @param uriString the container URI stored in the XML.
+	 * @param s3        S3 connection settings, or {@code null} for the defaults.
+	 * @param hcs       the HCS settings stored in the XML, or {@code null} for
+	 *                  {@link HcsOptions#DEFAULT}.
+	 * @param labels    the label setting stored in the XML.
+	 * @param seq       the sequence description restored from the XML.
+	 */
+	public static OmeZarrImageLoader openLoader(final String uriString, final S3Options s3,
+			final HcsOptions hcs, final boolean labels,
+			final AbstractSequenceDescription<?, ?, ?> seq) {
 		final URI uri = toUri(uriString);
 		final HcsOptions opts = hcs != null ? hcs : HcsOptions.DEFAULT;
 		// The world unit only shapes the setups and registrations, which the XML has
 		// already restored, so the loader can be rebuilt without knowing about it.
-		final Parsed p = parse(uri, s3, opts, WorldUnit.AS_STORED);
-		return new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3, opts);
+		final Parsed p = parse(uri, s3, opts, WorldUnit.AS_STORED, labels);
+		return new OmeZarrImageLoader(p.n5, uri, seq, p.props, p.hyperSlices, s3, opts, labels);
 	}
 
 	/** Everything discovery/parsing yields, shared by {@link #open} and {@link #openLoader}. */
@@ -285,7 +362,7 @@ public class OmeZarrOpener {
 	 * per-view path / hyperslice maps the loader consumes.
 	 */
 	private static Parsed parse(final URI uri, final S3Options s3, final HcsOptions hcs,
-			final WorldUnit unit) {
+			final WorldUnit unit, final boolean withLabels) {
 
 		// --- 1. Detect the storage format ------------------------------------
 		// OME-NGFF v0.5 is Zarr v3 (StorageFormat.ZARR); v0.4 is Zarr v2 (ZARR2).
@@ -347,8 +424,9 @@ public class OmeZarrOpener {
 		// to be strict we read one field and reuse its layout for all the others —
 		// the difference between three HTTP round-trips and two per field.
 		final List<ImageInfo> images = new ArrayList<>();
+		final boolean uniformFields = plate != null && !hcs.isStrictPerField();
 		int globalMaxT = 1;
-		if (plate != null && !hcs.isStrictPerField()) {
+		if (uniformFields) {
 			final ImageInfo template = parseTemplateImage(n5, refs, format);
 			for (final ImageRef ref : refs) {
 				images.add(template.copyFor(ref.path));
@@ -362,8 +440,24 @@ public class OmeZarrOpener {
 			}
 		}
 
+		// --- 3a. Label images, when asked for --------------------------------
+		final List<LabelRef> labels = withLabels
+				? discoverLabels(n5, refs, format, uniformFields)
+				: java.util.Collections.<LabelRef>emptyList();
+		for (final LabelRef label : labels) {
+			globalMaxT = Math.max(globalMaxT, label.info.sizeT);
+		}
+
 		// --- 3b. Express the calibration in the requested world unit ---------
-		applyWorldUnit(images, unit);
+		// Labels are converted together with the images: they live in the same world
+		// space, and leaving them as stored would float them off their source image.
+		// The first entry stays the first *image*, which is what the BigStitcher
+		// normalisation takes its reference voxel size from.
+		final List<ImageInfo> calibrated = new ArrayList<>(images);
+		for (final LabelRef label : labels) {
+			calibrated.add(label.info);
+		}
+		applyWorldUnit(calibrated, unit);
 
 		// --- 4. Build ViewSetups / registrations / metadata maps -------------
 		final List<ViewSetup> setups = new ArrayList<>();
@@ -382,8 +476,6 @@ public class OmeZarrOpener {
 		for (int s = 0; s < images.size(); s++) {
 			final ImageInfo img = images.get(s);
 			final HcsCoords coords = refs.get(s).hcs;
-			final ImageEntry entry = new ImageEntry(
-					img.levelPaths, img.mipmapResolutions, img.dimX, img.dimY, img.dimZ);
 
 			// One shared name entity per image, so all of an image's channels carry
 			// the same ImageName and downstream tools can group them by it. The id is
@@ -393,67 +485,107 @@ public class OmeZarrOpener {
 			final String imgName = imageName(img, coords, uri, s, multiImage);
 			final ImageName imageNameEntity = new ImageName(s, imgName);
 
-			for (int c = 0; c < img.sizeC; c++) {
-				final OmeroChannel oc = (img.omero != null && img.omero.channels != null
-						&& c < img.omero.channels.length) ? img.omero.channels[c] : null;
-				final String channelLabel = (oc != null && oc.label != null && !oc.label.isEmpty())
-						? oc.label : "channel " + c;
-				// A lone image needs no prefix: its channel labels already tell its
-				// setups apart. Several images in one container do.
-				final String setupName = (coords != null || multiImage)
-						? imgName + " - " + channelLabel
-						: channelLabel;
-
-				final ViewSetup vs = new ViewSetup(
-						setupId,
-						setupName,
-						img.size,
-						img.voxel,
-						new Tile(s), // one tile per image, so series/fields stay grouped
-						new Channel(c, channelLabel),
-						new Angle(0),
-						new Illumination(0));
-
-				vs.setAttribute(imageNameEntity);
-
-				// Plate / well / field entities (spimdata-extras), so downstream tools
-				// can group and filter the sources by their position on the plate.
-				if (coords != null) {
-					vs.setAttribute(plateEntity);
-					vs.setAttribute(wellEntities.computeIfAbsent(coords.wellId,
-							id -> new Well(id, coords.wellName, coords.row, coords.column)));
-					vs.setAttribute(new Field(coords.fieldId));
+			// The image, then each of its label images. A label image is a multiscale
+			// image like any other and goes through the same setup construction; what
+			// makes it a label is that it reuses its source image's Tile and ImageName
+			// (so the two stay grouped) and carries the Displaysettings label flag.
+			final List<ImageInfo> sources = new ArrayList<>();
+			final List<String> sourceNames = new ArrayList<>();
+			sources.add(img);
+			sourceNames.add(null);
+			for (final LabelRef label : labels) {
+				if (label.parent == s) {
+					sources.add(label.info);
+					sourceNames.add(label.name);
 				}
+			}
 
-				// Display settings entity (color + contrast), read by BDV-Playground.
-				final Displaysettings ds = new Displaysettings(setupId, setupName);
-				if (oc != null) {
-					final int[] rgba = parseHexColor(oc.color);
-					if (rgba != null) {
-						ds.color = rgba;
-						ds.isSet = true;
-					}
-					if (oc.window != null) {
-						if (oc.window.start != null) ds.min = oc.window.start;
-						if (oc.window.end != null) ds.max = oc.window.end;
-						ds.isSet = true;
-					}
-				}
-				vs.setAttribute(ds);
-				setups.add(vs);
-				bySetup.put(setupId, entry);
+			// Label images continue the source image's channel numbering rather than
+			// restarting at 0, so a label's setups do not collide with the image's own
+			// channel 0 in the dataset-wide Channel list.
+			int channelIdBase = 0;
+			for (int k = 0; k < sources.size(); k++) {
+				final ImageInfo src = sources.get(k);
+				final String labelName = sourceNames.get(k);
+				final boolean isLabel = labelName != null;
+				final ImageEntry entry = new ImageEntry(
+						src.levelPaths, src.mipmapResolutions, src.dimX, src.dimY, src.dimZ);
 
-				for (int t = 0; t < globalMaxT; t++) {
-					final ViewId viewId = new ViewId(t, setupId);
-					if (t < img.sizeT) {
-						byView.put(viewId, entry);
-						hyperSlices.put(viewId, hyperSlice(img, c, t));
-						registrations.add(new ViewRegistration(t, setupId, img.calibration));
+				for (int c = 0; c < src.sizeC; c++) {
+					final OmeroChannel oc = (src.omero != null && src.omero.channels != null
+							&& c < src.omero.channels.length) ? src.omero.channels[c] : null;
+					final String channelLabel;
+					final String setupName;
+					if (isLabel) {
+						// The label's own group name identifies it; a single-channel label
+						// (the usual case) needs no channel suffix on top of that.
+						final String base = LABELS_GROUP + "/" + labelName;
+						channelLabel = src.sizeC > 1 ? base + " - channel " + c : base;
+						setupName = imgName + " - " + channelLabel;
 					} else {
-						missing.add(viewId); // this image has fewer timepoints than the union
+						channelLabel = (oc != null && oc.label != null && !oc.label.isEmpty())
+								? oc.label : "channel " + c;
+						// A lone image needs no prefix: its channel labels already tell its
+						// setups apart. Several images in one container do.
+						setupName = (coords != null || multiImage)
+								? imgName + " - " + channelLabel
+								: channelLabel;
 					}
+
+					final ViewSetup vs = new ViewSetup(
+							setupId,
+							setupName,
+							src.size,
+							src.voxel,
+							new Tile(s), // one tile per image, so series/fields stay grouped
+							new Channel(channelIdBase + c, channelLabel),
+							new Angle(0),
+							new Illumination(0));
+
+					vs.setAttribute(imageNameEntity);
+
+					// Plate / well / field entities (spimdata-extras), so downstream tools
+					// can group and filter the sources by their position on the plate.
+					if (coords != null) {
+						vs.setAttribute(plateEntity);
+						vs.setAttribute(wellEntities.computeIfAbsent(coords.wellId,
+								id -> new Well(id, coords.wellName, coords.row, coords.column)));
+						vs.setAttribute(new Field(coords.fieldId));
+					}
+
+					// Display settings entity (color + contrast), read by BDV-Playground.
+					final Displaysettings ds = new Displaysettings(setupId, setupName);
+					if (isLabel) {
+						applyLabelDisplaysettings(ds);
+					} else if (oc != null) {
+						final int[] rgba = parseHexColor(oc.color);
+						if (rgba != null) {
+							ds.color = rgba;
+							ds.isSet = true;
+						}
+						if (oc.window != null) {
+							if (oc.window.start != null) ds.min = oc.window.start;
+							if (oc.window.end != null) ds.max = oc.window.end;
+							ds.isSet = true;
+						}
+					}
+					vs.setAttribute(ds);
+					setups.add(vs);
+					bySetup.put(setupId, entry);
+
+					for (int t = 0; t < globalMaxT; t++) {
+						final ViewId viewId = new ViewId(t, setupId);
+						if (t < src.sizeT) {
+							byView.put(viewId, entry);
+							hyperSlices.put(viewId, hyperSlice(src, c, t));
+							registrations.add(new ViewRegistration(t, setupId, src.calibration));
+						} else {
+							missing.add(viewId); // this image has fewer timepoints than the union
+						}
+					}
+					setupId++;
 				}
-				setupId++;
+				channelIdBase += src.sizeC;
 			}
 		}
 
@@ -605,6 +737,142 @@ public class OmeZarrOpener {
 		throw new IllegalArgumentException(
 				"No readable field image among the " + refs.size() + " listed by the plate metadata.",
 				lastFailure);
+	}
+
+	/**
+	 * Lists the label images of every discovered image, in image order and, within
+	 * an image, in the order its {@code labels} group registers them — deterministic,
+	 * as {@link #openLoader} 's re-discovery requires.
+	 * <p>
+	 * A label group that is listed but cannot be read or parsed is logged and
+	 * skipped, like an unreadable well: a partial segmentation should not cost you
+	 * the images it annotates.
+	 * <p>
+	 * <b>Which</b> labels an image has is read per image even on the plate fast path.
+	 * Unlike the acquisition layout, that is not safe to assume: segmentation is a
+	 * later, separate step, and it is entirely normal for only part of a plate to
+	 * have been through it — on the IDR's idr0001A plate, field {@code C/3/0} carries
+	 * a label and {@code C/4/0} does not. Reusing one field's list would hand out
+	 * setups pointing at groups that do not exist, which fails at the first pixel
+	 * request rather than here. That costs one attribute read per image, and only
+	 * when labels were asked for; what the fast path still saves is the
+	 * <b>parse</b> of each label's multiscale metadata, which happens once per label
+	 * name and is re-pointed at each image.
+	 *
+	 * @param uniformFields whether the plate fast path applies.
+	 */
+	private static List<LabelRef> discoverLabels(final N5Reader n5, final List<ImageRef> refs,
+			final StorageFormat format, final boolean uniformFields) {
+
+		final List<LabelRef> labels = new ArrayList<>();
+		// name -> the parse that stands in for every image's label of that name, on
+		// the fast path. Holds nulls for a label that failed to parse, so a plate does
+		// not retry (and re-log) a broken segmentation once per field.
+		final Map<String, ImageInfo> shared = uniformFields ? new HashMap<>() : null;
+
+		for (int s = 0; s < refs.size(); s++) {
+			final String imagePath = refs.get(s).path;
+			for (final String name : readLabelNames(n5, imagePath, format)) {
+				ImageInfo info;
+				if (uniformFields) {
+					if (!shared.containsKey(name)) {
+						shared.put(name, parseLabelImage(n5, imagePath, name, format));
+					}
+					final ImageInfo template = shared.get(name);
+					info = template == null ? null : template.copyFor(labelPath(imagePath, name));
+				} else {
+					info = parseLabelImage(n5, imagePath, name, format);
+				}
+				if (info != null) labels.add(new LabelRef(s, name, info));
+			}
+		}
+		log.info("  {} label image(s)", labels.size());
+		return labels;
+	}
+
+	/**
+	 * Reads the label images an image registers in its {@code labels} subgroup, or an
+	 * empty array when it has none. v0.5 nests the list under {@code ome}; v0.4 stores
+	 * it at the group root — keyed on the storage format for the same reason
+	 * {@link #readPlate} is (a Zarr-v3 reader happily returns a Zarr-v2 container's
+	 * root attributes, which would let a v0.4 label be looked up under the wrong
+	 * nesting).
+	 * <p>
+	 * Only registered labels are opened. OME-NGFF 0.4 does allow unlisted groups to be
+	 * labels, but nothing points at them, and a store served over plain HTTP cannot be
+	 * listed to find them.
+	 */
+	private static String[] readLabelNames(final N5Reader n5, final String imagePath,
+			final StorageFormat format) {
+		final String key = format == StorageFormat.ZARR ? "ome/labels" : "labels";
+		final String group = imagePath + "/" + LABELS_GROUP;
+		String[] listed = null;
+		try {
+			listed = n5.getAttribute(group, key, String[].class);
+		} catch (final Exception e) {
+			log.debug("No {} at {}: {}", key, group, e.getMessage());
+		}
+		if (listed == null) return new String[0];
+		final List<String> names = new ArrayList<>();
+		for (final String name : listed) {
+			if (name == null) continue;
+			// Entries may name a nested group ("original/0"), and the intermediate
+			// groups carry no metadata of their own — the path is all we need.
+			final String trimmed = trimSlashes(name);
+			if (!trimmed.isEmpty()) names.add(trimmed);
+		}
+		return names.toArray(new String[0]);
+	}
+
+	/** Parses one label image, or {@code null} (with a warning) if it cannot be read. */
+	private static ImageInfo parseLabelImage(final N5Reader n5, final String imagePath,
+			final String name, final StorageFormat format) {
+		final String path = labelPath(imagePath, name);
+		try {
+			return parseImage(n5, path, format);
+		} catch (final Exception e) {
+			log.warn("Skipping label image {}: {}", path, e.getMessage());
+			return null;
+		}
+	}
+
+	/** The group path of the label image registered as {@code name} under an image. */
+	private static String labelPath(final String imagePath, final String name) {
+		return imagePath + "/" + LABELS_GROUP + "/" + name;
+	}
+
+	/**
+	 * Marks a {@link ViewSetup}'s display settings as a label image: object indices
+	 * rather than intensities, to be drawn with a categorical LUT and without
+	 * interpolation.
+	 * <p>
+	 * {@code isSet} deliberately stays {@code false}. Nothing in the OME-NGFF metadata
+	 * says what range the object indices span, and finding out means reading the
+	 * pixels — so BigDataViewer is left to autoscale, which beats any constant we
+	 * could invent here (a fixed {@code 0..65535} would render the {@code int8} label
+	 * images the IDR publishes as solid black). The fields set below are written to
+	 * the BDV XML regardless of {@code isSet}, and the white fallback color means a
+	 * renderer that cannot resolve {@link Displaysettings#lutName} still has something
+	 * usable rather than an arbitrary channel color.
+	 */
+	private static void applyLabelDisplaysettings(final Displaysettings ds) {
+		ds.isLabelImage = true;
+		ds.lutName = LABEL_LUT;
+		ds.color = LABEL_COLOR.clone(); // Displaysettings.color is mutable and shared onwards
+		ds.projectionMode = LABEL_PROJECTION_MODE;
+	}
+
+	/** One label image: which discovered image it annotates, its registered name, its metadata. */
+	private static final class LabelRef {
+		final int parent;
+		final String name;
+		final ImageInfo info;
+
+		LabelRef(final int parent, final String name, final ImageInfo info) {
+			this.parent = parent;
+			this.name = name;
+			this.info = info;
+		}
 	}
 
 	/** A plate's display name, falling back to the last path segment of the container. */

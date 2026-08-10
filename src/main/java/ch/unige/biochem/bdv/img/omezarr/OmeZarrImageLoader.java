@@ -81,6 +81,7 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 	private final Map<ViewId, HyperSlice> hyperSlices;
 	private final S3Options s3Options;
 	private final HcsOptions hcsOptions;
+	private final boolean labels;
 
 	/**
 	 * @param reader      an already-opened reader on the container.
@@ -132,11 +133,34 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 			final AbstractSequenceDescription<?, ?, ?> seq,
 			final N5Properties props, final Map<ViewId, HyperSlice> hyperSlices,
 			final S3Options s3Options, final HcsOptions hcsOptions) {
+		this(reader, uri, seq, props, hyperSlices, s3Options, hcsOptions, false);
+	}
+
+	/**
+	 * @param reader      an already-opened reader on the container.
+	 * @param uri         the container URI.
+	 * @param seq         the sequence description.
+	 * @param props       the OME-Zarr metadata/path resolver.
+	 * @param hyperSlices per-{@code (timepoint,setup)} description of the reduction
+	 *                    from the stored array down to a 3D view.
+	 * @param s3Options   the S3 settings {@code reader} was opened with, or
+	 *                    {@code null} for a local, {@code https://} or plain-AWS
+	 *                    container.
+	 * @param hcsOptions  the HCS settings the plate was discovered with, or
+	 *                    {@code null} / {@link HcsOptions#DEFAULT} for a container
+	 *                    that is not a plate, or a plate opened whole.
+	 * @param labels      whether the images' {@code labels} groups were opened too.
+	 */
+	public OmeZarrImageLoader(final N5Reader reader, final URI uri,
+			final AbstractSequenceDescription<?, ?, ?> seq,
+			final N5Properties props, final Map<ViewId, HyperSlice> hyperSlices,
+			final S3Options s3Options, final HcsOptions hcsOptions, final boolean labels) {
 		super(reader, uri, seq);
 		this.properties = props;
 		this.hyperSlices = hyperSlices;
 		this.s3Options = s3Options;
 		this.hcsOptions = hcsOptions;
+		this.labels = labels;
 	}
 
 	/**
@@ -157,6 +181,17 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 	 */
 	public HcsOptions getHcsOptions() {
 		return hcsOptions;
+	}
+
+	/**
+	 * Whether the images' {@code labels} groups were opened alongside them. Like
+	 * {@link #getHcsOptions()} this is part of the dataset's identity rather than
+	 * state the loader consults: label images contribute their own setups, so a
+	 * saved BDV XML has to be re-discovered with the same setting or the setup ids
+	 * would no longer line up.
+	 */
+	public boolean isLabelsOpened() {
+		return labels;
 	}
 
 	@Override

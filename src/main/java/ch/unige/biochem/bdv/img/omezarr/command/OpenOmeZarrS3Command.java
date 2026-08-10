@@ -93,6 +93,12 @@ public class OpenOmeZarrS3Command implements Command {
 			choices = { "MILLIMETER", "MICROMETER", "NANOMETER", "PIXEL", "BIGSTITCHER COMPATIBLE" })
 	public String unit = "MILLIMETER";
 
+	@Parameter(required = false,
+			label = "Open label images",
+			description = "Also open the segmentations stored in each image's 'labels' group, "
+					+ "as extra sources next to the image they annotate.")
+	public boolean labels = false;
+
 	@Parameter(type = ItemIO.OUTPUT)
 	AbstractSpimData<?> spimData;
 
@@ -100,6 +106,6 @@ public class OpenOmeZarrS3Command implements Command {
 	public void run() {
 		spimData = OmeZarrOpener.open(url,
 				new S3Options(endpoint, region, pathStyle, accessKey, secretKey),
-				null, WorldUnit.fromChoice(unit));
+				null, WorldUnit.fromChoice(unit), labels);
 	}
 }

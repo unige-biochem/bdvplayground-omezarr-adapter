@@ -48,7 +48,9 @@ import java.util.List;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertNull;
 
 /**
@@ -479,6 +481,106 @@ public class OmeZarrOpenerIT {
 		assertArrayEquals(new long[] { 464, 494, 1 }, full.dimensionsAsLongArray());
 	}
 
+	// ---------------------------------------------------------------------------
+	// Label images (opt-in) — A and B are the same image, each with one label
+	// ---------------------------------------------------------------------------
+
+	/**
+	 * Labels stay out unless asked for: the flag defaults to off, so a container
+	 * that has a {@code labels} group opens exactly as it did before label support.
+	 */
+	@Test
+	public void labels_areOptIn() {
+		assertEquals("labels must not be opened by default", 2, setups(openOrSkip(A_V04_6001240)).size());
+		assertEquals(2, setups(openOrSkip(B_V05_6001240)).size());
+	}
+
+	/**
+	 * The v0.4 label: one extra setup, on the source image's tile and sharing its
+	 * {@link ImageName}, flagged as a label image with a LUT name and a white
+	 * fallback color, and carrying the source image's calibration.
+	 */
+	@Test
+	public void v04_6001240_label_isExtraSetupOnTheSameImage() {
+		final AbstractSpimData<?> sd = openWithLabelsOrSkip(A_V04_6001240);
+		final List<? extends BasicViewSetup> setups = setups(sd);
+		assertEquals("2 channels + 1 label image", 3, setups.size());
+
+		final ViewSetup lamin = (ViewSetup) setups.get(0);
+		final ViewSetup label = (ViewSetup) setups.get(2);
+		assertEquals("6001240 - labels/0", label.getName());
+
+		// Grouped with the image it annotates: same tile, same ImageName entity.
+		assertEquals("label rides the source image's tile",
+				lamin.getAttribute(Tile.class).getId(), label.getAttribute(Tile.class).getId());
+		assertEquals("label shares the source image's ImageName",
+				lamin.getAttribute(ImageName.class), label.getAttribute(ImageName.class));
+		// ... but not its channel id, which would collide in the dataset-wide list.
+		assertEquals("label channel continues the image's numbering",
+				2, label.getAttribute(Channel.class).getId());
+
+		// Same geometry and calibration as the image (the label annotates it 1:1).
+		assertArrayEquals(new long[] { 271, 275, 236 }, sizeXYZ(label));
+		assertEquals(VX_6001240, label.getVoxelSize().dimension(0), EPS);
+		assertEquals(VZ_6001240, label.getVoxelSize().dimension(2), EPS);
+		assertEquals("micrometer", label.getVoxelSize().unit());
+
+		final Displaysettings ds = label.getAttribute(Displaysettings.class);
+		assertNotNull(ds);
+		assertTrue("must be flagged as a label image", ds.isLabelImage);
+		assertEquals("glasbey_on_dark", ds.lutName);
+		assertArrayEquals("white fallback for LUT-unaware renderers",
+				new int[] { 255, 255, 255, 255 }, ds.color);
+		assertEquals("Avg", ds.projectionMode);
+		// Deliberately unset: nothing says what range the object indices span, so
+		// BigDataViewer is left to autoscale rather than given an invented contrast.
+		assertFalse("contrast must be left unset", ds.isSet);
+
+		// The image's own setups are untouched by the label being there.
+		assertEquals("LaminB1", lamin.getName());
+		assertEquals(0, lamin.getAttribute(Channel.class).getId());
+		assertFalse(lamin.getAttribute(Displaysettings.class).isLabelImage);
+		assertEquals("", lamin.getAttribute(Displaysettings.class).lutName);
+	}
+
+	/** The v0.5 twin: the same label, read through the {@code ome/} nesting. */
+	@Test
+	public void v05_6001240_label_matchesV04() {
+		final AbstractSpimData<?> sd = openWithLabelsOrSkip(B_V05_6001240);
+		final List<? extends BasicViewSetup> setups = setups(sd);
+		assertEquals(3, setups.size());
+
+		final ViewSetup label = (ViewSetup) setups.get(2);
+		// Named after the container, which differs between the two copies.
+		assertEquals("6001240_labels - labels/0", label.getName());
+		assertArrayEquals(new long[] { 271, 275, 236 }, sizeXYZ(label));
+		assertEquals(VX_6001240, label.getVoxelSize().dimension(0), EPS);
+		assertTrue(label.getAttribute(Displaysettings.class).isLabelImage);
+		assertEquals(2, label.getAttribute(Channel.class).getId());
+	}
+
+	/**
+	 * A label image is served like any other: its own resolution levels (the v0.4
+	 * label has four where its source image has three) and a real block load of its
+	 * {@code int8} pixels, which no other test in this class exercises.
+	 */
+	@Test
+	public void pixelLoad_label() {
+		final AbstractSpimData<?> sd = openWithLabelsOrSkip(A_V04_6001240);
+		final AbstractSequenceDescription<?, ?, ?> seq = sd.getSequenceDescription();
+		final int labelSetup = setups(sd).get(2).getId();
+		final MultiResolutionSetupImgLoader<?> sil =
+				(MultiResolutionSetupImgLoader<?>) seq.getImgLoader().getSetupImgLoader(labelSetup);
+
+		assertEquals("the label has its own mipmap pyramid", 4, sil.numMipmapLevels());
+		assertEquals("int8 labels load as ByteType",
+				"ByteType", sil.getImageType().getClass().getSimpleName());
+
+		final RandomAccessibleInterval<?> img = coarsestImageOrSkip(sd, labelSetup);
+		assertEquals("view must be reduced to x,y,z", 3, img.numDimensions());
+		assertCenterVoxelReadable(img);
+	}
+
 	/** Loads the coarsest level of a setup, skipping the test if blosc is missing. */
 	private static RandomAccessibleInterval<?> coarsestImageOrSkip(final AbstractSpimData<?> sd,
 			final int setupId) {
@@ -518,12 +620,22 @@ public class OmeZarrOpenerIT {
 		return openOrSkip(url, null);
 	}
 
+	/** As {@link #openOrSkip(String)}, additionally opening the {@code labels} groups. */
+	private static AbstractSpimData<?> openWithLabelsOrSkip(final String url) {
+		return openOrSkip(url, null, true);
+	}
+
 	/** As {@link #openOrSkip(String)}, in an explicit world coordinate unit. */
 	private static AbstractSpimData<?> openOrSkip(final String url, final WorldUnit unit) {
+		return openOrSkip(url, unit, false);
+	}
+
+	private static AbstractSpimData<?> openOrSkip(final String url, final WorldUnit unit,
+			final boolean labels) {
 		Assume.assumeTrue("opt-in: run with -Domezarr.integration=true", INTEGRATION);
 		Assume.assumeTrue("IDR host unreachable", isReachable());
 		try {
-			return OmeZarrOpener.open(url, null, null, unit);
+			return OmeZarrOpener.open(url, null, null, unit, labels);
 		} catch (final NoClassDefFoundError | UnsatisfiedLinkError e) {
 			// v0.4/Zarr-v2 needs native blosc even to read compressor metadata.
 			Assume.assumeNoException("native blosc unavailable (set -Djna.library.path)", e);

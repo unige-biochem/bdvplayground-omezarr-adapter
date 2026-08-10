@@ -85,6 +85,53 @@ public class XmlIoOmeZarrRoundTripIT {
 		saveReloadReopens(V04_2D_MULTICHANNEL, 1);
 	}
 
+	/**
+	 * A dataset opened with its label images must reload as the same dataset. The
+	 * setting is part of its identity: replayed without it, discovery would find two
+	 * setups where the XML describes three, and every id from the label on would
+	 * refer to something else.
+	 */
+	@Test
+	public void saveReloadReopens_withLabels() throws Exception {
+		final SpimData original = (SpimData) openOrSkip(V04_6001240, true);
+		assertEquals("2 channels + 1 label image", 3, viewSetups(original).size());
+
+		final File xml = new File(tmp.getRoot(), "omezarr-labels-roundtrip.xml");
+		new XmlIoSpimData().save(original, xml.getAbsolutePath());
+		final SpimData reloaded = new XmlIoSpimData().load(xml.getAbsolutePath());
+
+		final OmeZarrImageLoader loader =
+				(OmeZarrImageLoader) reloaded.getSequenceDescription().getImgLoader();
+		assertTrue("the label setting is replayed on load", loader.isLabelsOpened());
+
+		final List<ViewSetup> after = viewSetups(reloaded);
+		assertEquals("view setups", 3, after.size());
+
+		final ViewSetup label = after.get(2);
+		assertEquals("6001240 - labels/0", label.getName());
+		final Displaysettings ds = label.getAttribute(Displaysettings.class);
+		assertTrue("label flag survives the XML", ds.isLabelImage);
+		assertEquals("glasbey_on_dark", ds.lutName);
+		assertArrayEquals(new int[] { 255, 255, 255, 255 }, ds.color);
+		// The label is still grouped with the image it annotates.
+		assertEquals(after.get(0).getAttribute(ImageName.class), label.getAttribute(ImageName.class));
+
+		// The re-discovered loader must serve the label's pixels, not just describe it.
+		final int tp = reloaded.getSequenceDescription().getTimePoints()
+				.getTimePointsOrdered().get(0).getId();
+		final MultiResolutionSetupImgLoader<?> sil = (MultiResolutionSetupImgLoader<?>)
+				loader.getSetupImgLoader(label.getId());
+		final RandomAccessibleInterval<?> img;
+		try {
+			img = sil.getImage(tp, sil.numMipmapLevels() - 1);
+		} catch (final NoClassDefFoundError | UnsatisfiedLinkError e) {
+			Assume.assumeNoException("native blosc unavailable for pixel decode", e);
+			return;
+		}
+		assertEquals("reloaded label view is 3D", 3, img.numDimensions());
+		assertNotNull(img.randomAccess().get());
+	}
+
 	private void saveReloadReopens(final String url, final long expectedSizeZ) throws Exception {
 		final SpimData original = (SpimData) openOrSkip(url);
 
@@ -160,11 +207,16 @@ public class XmlIoOmeZarrRoundTripIT {
 	}
 
 	private static SpimData openOrSkip(final String url) {
+		return openOrSkip(url, false);
+	}
+
+	private static SpimData openOrSkip(final String url, final boolean labels) {
 		Assume.assumeTrue("opt-in: run with -Domezarr.integration=true",
 				Boolean.getBoolean("omezarr.integration"));
 		Assume.assumeTrue("IDR host unreachable", probe("https://livingobjects.ebi.ac.uk/"));
 		try {
-			return (SpimData) ch.unige.biochem.bdv.img.omezarr.OmeZarrOpener.open(url);
+			return (SpimData) ch.unige.biochem.bdv.img.omezarr.OmeZarrOpener.open(
+					url, null, null, null, labels);
 		} catch (final NoClassDefFoundError | UnsatisfiedLinkError e) {
 			Assume.assumeNoException("native blosc unavailable (set -Djna.library.path)", e);
 			throw e; // unreachable

@@ -49,7 +49,8 @@ container (image at the container root).
 
 **Out (later milestones):** `omero` channel names/colors/contrast; HCS
 plate/well; `labels`; RFC-5 rich transforms; multi-image / `bioformats2raw`
-series discovery; writing/export.
+series discovery; writing/export. (All but the last two are since done — see
+*Status* below.)
 
 ## Components
 
@@ -215,6 +216,44 @@ series discovery; writing/export.
     conversion in voxel size *and* registration, `PIXEL`, and the BigStitcher
     normalisation + `Displaysettings` stripping).
 
+- [x] **Label images** (`labels`) — an image's `labels` subgroup lists label
+  images, each of them an ordinary multiscale image with integer pixels plus an
+  `image-label` block. Opening them is **opt-in** (`open(uri, s3, hcs, unit,
+  true)`, or the *Open label images* checkbox in both commands), because merely
+  finding out whether an image has any costs an attribute read per image. A label
+  goes through `parseImage` unchanged and becomes extra `ViewSetup`s that reuse
+  their source image's `Tile` and `ImageName` — so the two stay grouped — with
+  channel ids continuing after the image's own rather than restarting at 0, which
+  would collide in the dataset-wide `Channel` list. Named after the registering
+  group (`6001240 - labels/0`).
+  - The v0.4 / v0.5 split is the usual one and is keyed on the storage format, not
+    tried both ways: `labels` at the group root vs `ome/labels`, for the reason
+    recorded under HCS plates.
+  - `Displaysettings`: `isLabelImage = true`, `lutName = "glasbey_on_dark"`, white
+    fallback color, `projectionMode = "Avg"`. `isSet` stays **false** — nothing in
+    the metadata says what range the object indices span, and reading pixels to
+    find out is what an importer must not do, so BDV autoscales instead. (A fixed
+    `0..65535` would render the `int8` labels the IDR publishes as solid black.)
+    All four fields serialize regardless of `isSet`.
+  - The loader needed **no** changes: `N5ImageLoader` resolves
+    `DataTypeProperties` per setup, so an `int8` label and a `uint16` image coexist
+    in one dataset, and `prepareCachedImage`/`extract3D` are generic over the type.
+  - Calibration is converted with the images (one `applyWorldUnit` call over both),
+    or a label would float off its source image in a non-stored world unit.
+  - Gotcha handled: on a plate, **which** labels a field has is read per field even
+    on the uniform-field fast path. Fields share an acquisition but not a
+    segmentation — on idr0001A/2551 wells A1–A5 carry a label and A6 does not — so
+    reusing the template's list would create setups pointing at groups that do not
+    exist, failing only at the first pixel request. Only the label's *layout* is
+    parsed once (per label name) and re-pointed per field.
+  - Persisted in the BDV XML (`<labels>`), like the HCS caps and for the same
+    reason: label setups shift every id after them.
+  - Covered by four `OmeZarrOpenerIT` tests on the v0.4/v0.5 twins of idr0062A
+    (opt-in default, entity grouping and display settings, v0.4↔v0.5 parity, and a
+    pixel load of the label's own 4-level pyramid as `ByteType`), one `OmeZarrHcsIT`
+    test on the partially-segmented plate, and an `XmlIoOmeZarrRoundTripIT` test
+    proving the flag, the label setups and the label flags survive save/reload.
+
 ## Next
 
 - [ ] **Interactive** BDV display check (`OpenOmeZarrDemo.main` with a UI; note
@@ -224,6 +263,10 @@ series discovery; writing/export.
   bdv-playground (test-scope) dependency.
 - [ ] Cache: reuse Playground's global cache (the loader's
   `VolatileGlobalCellCache` is the injection point).
+- [ ] Render label images with their own colors: the `image-label` `colors` table
+  is a value&rarr;RGBA lookup that `Displaysettings` cannot express, so it needs a
+  `ConvertedSource` mapping label value to `ARGBType`. Belongs with the
+  Playground-integration item above, which is what resolves `lutName` anyway.
 - [ ] HCS follow-ups: expose the plate's `acquisitions` (a well image carries an
   `acquisition` id, which could become a `TimePoint` or an entity of its own), and
   lay fields out on a plate grid via `ViewRegistration` rather than stacking them

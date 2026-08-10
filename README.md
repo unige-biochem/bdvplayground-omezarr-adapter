@@ -113,6 +113,45 @@ AbstractSpimData<?> corner = OmeZarrOpener.open(
 Most IDR plates are 2D (`c,y,x`), which is fine — they open as single-slice
 volumes like any other 2D image.
 
+### Label images
+
+An OME-NGFF image may carry segmentations in a `labels` subgroup: a list of
+registered label images, each of them a multiscale image of its own with integer
+pixels and an `image-label` block describing its object colors. Opening them is
+**opt-in** — one extra request per image just to find out whether there are any,
+and not every workflow wants masks as sources:
+
+```java
+AbstractSpimData<?> withLabels = OmeZarrOpener.open(
+        "https://uk1s3.embassy.ebi.ac.uk/idr/zarr/v0.4/idr0062A/6001240.zarr",
+        null, null, null, true);
+```
+
+Both Fiji commands expose it as an **Open label images** checkbox, off by default.
+
+Each label image becomes extra `ViewSetup`s next to the image it annotates: same
+`Tile` and the same `ImageName`, so the two stay grouped (and, on a plate, the
+same `Well` and `Field`), but with channel ids continuing after the image's own so
+the two do not collide. They are named after the group that registers them —
+`6001240 - labels/0`. Their `Displaysettings` carries `isLabelImage = true`, the
+LUT name `glasbey_on_dark` and a white fallback color; resolving that LUT is the
+renderer's job. The contrast range is deliberately left unset, since nothing in
+the metadata says what range the object indices span and reading the pixels to
+find out is exactly what an importer should not do.
+
+A label image is a normal image otherwise, so it need not match its source: it may
+have fewer channels, its own pyramid depth, and a flat `z` over a stack (OME-NGFF
+allows `1` for a dimension a label does not use).
+
+On a plate, **which** labels a field has is read per field even on the uniform-field
+fast path. Segmentation happens well by well, so it is normal for only part of a
+plate to have been through it — on IDR's `idr0001A/2551`, wells A1–A5 carry a
+label and A6 does not. Only the label's layout is parsed once and reused.
+
+Only registered labels are opened. OME-NGFF 0.4 permits unlisted groups to be
+labels as well, but nothing points at them and a store served over plain HTTP
+cannot be listed to find them.
+
 ### S3 endpoints
 
 An `s3://bucket/key` URI carries a bucket and a key but **no endpoint**, so the
@@ -183,7 +222,9 @@ For an HCS plate the `HcsOptions` caps are saved alongside the URI too. Capping
 discovery decides which field images exist and therefore which setup ids the XML
 refers to, so a plate opened with `wells(4).fields(2)` has to be re-discovered the
 same way — otherwise it would reload as the whole plate and the ids would no
-longer mean the same thing.
+longer mean the same thing. Whether the label images were opened is saved for the
+same reason: they are setups too, so reloading without them would shift every id
+from the first label onwards.
 
 For an `s3://` container the endpoint, region and addressing style are saved
 alongside the URI, since the URI alone does not say which store to talk to.
@@ -193,9 +234,12 @@ have to be in place on whichever machine opens the XML.
 
 ### Not yet supported
 
-- `labels` (segmentation) groups
 - Writing / export of pixel data (OME-Zarr is read-only; only the BDV XML is written)
 - Coordinate transformations beyond `scale` + `translation`
+- Rendering label images with their `image-label` colors — the label's `colors`
+  table is a value&rarr;RGBA lookup, which `Displaysettings` (one color plus a
+  contrast range) cannot express. The setups are flagged and given a LUT name;
+  turning that into a per-object coloring belongs to the renderer.
 
 See [`PLAN.md`](PLAN.md) for the roadmap.
 
@@ -206,11 +250,11 @@ See [`PLAN.md`](PLAN.md) for the roadmap.
 | Open an OME-Zarr dataset | `Plugins > BigDataViewer-Playground > Import > Dataset - Create [OME-Zarr]` |
 | Open an OME-Zarr on an S3 store | `Plugins > BigDataViewer-Playground > Import > Dataset - Create [OME-Zarr on S3]` |
 
-The first command takes a location field (path or URL) and a world-unit choice;
-the second adds an S3 endpoint, region, addressing style and optional
-credentials. Both output an `AbstractSpimData`, which BigDataViewer-Playground
-displays and registers, and both open an HCS plate whole — the `HcsOptions` caps
-are a scripting option.
+The first command takes a location field (path or URL), a world-unit choice and an
+**Open label images** checkbox; the second adds an S3 endpoint, region, addressing
+style and optional credentials. Both output an `AbstractSpimData`, which
+BigDataViewer-Playground displays and registers, and both open an HCS plate whole
+— the `HcsOptions` caps are a scripting option.
 
 ## Scripting
 

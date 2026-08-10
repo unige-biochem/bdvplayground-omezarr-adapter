@@ -56,7 +56,9 @@ import java.io.File;
  * discovery has to reproduce the very same list of field images, since that list
  * is what assigns the setup ids the XML refers to; a plate opened with
  * {@code wells(4).fields(2)} would otherwise reload as the whole plate and the
- * ids would no longer mean the same thing.
+ * ids would no longer mean the same thing. Whether the images' {@code labels}
+ * groups were opened is persisted for exactly the same reason — label images are
+ * setups too.
  * <p>
  * For an {@code s3://} container the {@link S3Options} endpoint / region /
  * addressing style are persisted alongside the URI, since an {@code s3://} URI on
@@ -94,6 +96,9 @@ public class XmlIoOmeZarrImageLoader implements XmlIoBasicImgLoader<OmeZarrImage
 	/** Child element holding the HCS per-field metadata flag, absent when uniform. */
 	private static final String HCS_STRICT_TAG = "hcsstrictperfield";
 
+	/** Child element holding the label flag, absent when labels were not opened. */
+	private static final String LABELS_TAG = "labels";
+
 	@Override
 	public Element toXml(final OmeZarrImageLoader imgLoader, final File basePath) {
 		final Element elem = new Element("ImageLoader");
@@ -127,6 +132,12 @@ public class XmlIoOmeZarrImageLoader implements XmlIoBasicImgLoader<OmeZarrImage
 				elem.addContent(XmlHelpers.textElement(HCS_STRICT_TAG, "true"));
 			}
 		}
+
+		// Likewise for the labels: they contribute setups of their own, so reloading
+		// without them would shift every setup id after the first label image.
+		if (imgLoader.isLabelsOpened()) {
+			elem.addContent(XmlHelpers.textElement(LABELS_TAG, "true"));
+		}
 		return elem;
 	}
 
@@ -134,8 +145,17 @@ public class XmlIoOmeZarrImageLoader implements XmlIoBasicImgLoader<OmeZarrImage
 	public OmeZarrImageLoader fromXml(final Element elem, final File basePath,
 			final AbstractSequenceDescription<?, ?, ?> sequenceDescription) {
 		final String uri = XmlHelpers.getText(elem, URI_TAG);
-		return OmeZarrOpener.openLoader(
-				uri, s3OptionsFromXml(elem), hcsOptionsFromXml(elem), sequenceDescription);
+		return OmeZarrOpener.openLoader(uri, s3OptionsFromXml(elem), hcsOptionsFromXml(elem),
+				labelsFromXml(elem), sequenceDescription);
+	}
+
+	/**
+	 * Whether the dataset was opened with its label images. An XML written without
+	 * them, or before label support, has no such element and yields {@code false} —
+	 * the same default as {@link OmeZarrOpener#open(String)}.
+	 */
+	static boolean labelsFromXml(final Element elem) {
+		return Boolean.parseBoolean(XmlHelpers.getText(elem, LABELS_TAG, "false"));
 	}
 
 	/**

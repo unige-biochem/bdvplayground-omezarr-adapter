@@ -374,6 +374,56 @@ public class OmeZarrHcsIT {
 		assertNotNull(ra.get());
 	}
 
+	// ---------------------------------------------------------------------------
+	// F — labels on a plate, where only part of the plate is segmented
+	// ---------------------------------------------------------------------------
+
+	/**
+	 * A plate is segmented well by well, so the labels are <em>not</em> uniform
+	 * across it even though the acquisition is: on this plate wells A1&ndash;A5 carry
+	 * a label image and A6 does not. Reusing the template field's label list would
+	 * give A6 a setup pointing at a group that does not exist — which would only
+	 * blow up later, at the first pixel request — so the list is read per field.
+	 */
+	@Test
+	public void v04_plate_labels_onlyWhereTheyExist() {
+		final SpimData sd = openOrSkip(V04_PLATE, HcsOptions.wells(6).fields(1), true);
+		final List<ViewSetup> setups = viewSetups(sd);
+
+		// 6 wells x 1 field x 2 channels, plus a label on the five that have one.
+		assertEquals(17, setups.size());
+		assertEquals("still one Tile per field image", 6, distinctTiles(setups).size());
+
+		final ViewSetup gfp = setups.get(0);
+		final ViewSetup label = setups.get(2);
+		assertEquals("A1 - f0 - GFP", gfp.getName());
+		assertEquals("A1 - f0 - labels/0", label.getName());
+
+		// The label is a source of the field it annotates: same tile, well and field.
+		assertEquals(gfp.getAttribute(Tile.class).getId(), label.getAttribute(Tile.class).getId());
+		assertEquals("A1", label.getAttribute(Well.class).getName());
+		assertEquals(0, label.getAttribute(Field.class).getId());
+		assertEquals("label channel continues the field's numbering",
+				2, label.getAttribute(Channel.class).getId());
+
+		final Displaysettings ds = label.getAttribute(Displaysettings.class);
+		assertTrue(ds.isLabelImage);
+		assertEquals("glasbey_on_dark", ds.lutName);
+		assertArrayEquals(new int[] { 255, 255, 255, 255 }, ds.color);
+
+		// The label of this plate is a flat mask over a 16-slice acquisition — a
+		// legal "1 where the dimension is irrelevant" — so it keeps its own z.
+		assertArrayEquals(new long[] { 1376, 1040, 16 }, sizeXYZ(gfp));
+		assertArrayEquals(new long[] { 1376, 1040, 1 }, sizeXYZ(label));
+		assertEquals(0.1077, label.getVoxelSize().dimension(0), EPS);
+
+		// A5 is the last segmented well; A6's two channels close the list with no
+		// label setup after them.
+		assertEquals("A5 - f0 - labels/0", setups.get(14).getName());
+		assertEquals("A6 - f0 - GFP", setups.get(15).getName());
+		assertEquals("A6 - f0 - Cascade blue", setups.get(16).getName());
+	}
+
 	// ===========================================================================
 	// Gating + helpers (mirrors OmeZarrOpenerIT)
 	// ===========================================================================
@@ -382,10 +432,15 @@ public class OmeZarrHcsIT {
 	private static Boolean reachable; // cached reachability probe
 
 	private static SpimData openOrSkip(final String url, final HcsOptions hcs) {
+		return openOrSkip(url, hcs, false);
+	}
+
+	private static SpimData openOrSkip(final String url, final HcsOptions hcs,
+			final boolean labels) {
 		Assume.assumeTrue("opt-in: run with -Domezarr.integration=true", INTEGRATION);
 		Assume.assumeTrue("IDR host unreachable", isReachable());
 		try {
-			return (SpimData) OmeZarrOpener.open(url, null, hcs);
+			return (SpimData) OmeZarrOpener.open(url, null, hcs, null, labels);
 		} catch (final NoClassDefFoundError | UnsatisfiedLinkError e) {
 			// v0.4/Zarr-v2 needs native blosc even to read compressor metadata.
 			Assume.assumeNoException("native blosc unavailable (set -Djna.library.path)", e);
