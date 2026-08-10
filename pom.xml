@@ -83,7 +83,7 @@
 
 		<license.licenseName>mit</license.licenseName>
 		<license.copyrightOwners>Department of Biochemistry, University of Geneva</license.copyrightOwners>
-		<bigdataviewer-spimdata-extras.version>0.23.0-SNAPSHOT</bigdataviewer-spimdata-extras.version>
+		<bigdataviewer-spimdata-extras.version>0.23.0</bigdataviewer-spimdata-extras.version>
 
 		<reflections.version>0.10.2</reflections.version> <!-- for test only -->
 
