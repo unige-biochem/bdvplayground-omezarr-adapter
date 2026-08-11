@@ -131,6 +131,41 @@ public class ExtractTo3DTest {
 		assertPlane(out, 4, 1);
 	}
 
+	// --- non-canonical spatial order: (c,x,y,z) stored as (z,y,x,c) ------------
+
+	@Test
+	public void volume3D_permutedAxes_areReorderedToXyz() {
+		final RandomAccessibleInterval<UnsignedShortType> stored = positions(new long[] { SZ, SY, SX });
+		final RandomAccessibleInterval<UnsignedShortType> out = OmeZarrImageLoader.extract3D(
+				stored, new HyperSlice(new int[0], new long[0], false, new int[] { 2, 1, 0 }));
+
+		assertSize(out, SX, SY, SZ);
+		assertSameVoxels(out, stored, new int[] { 2, 1, 0 });
+	}
+
+	@Test
+	public void volume3D_permutedAxesWithChannel_slicesThenReorders() {
+		final RandomAccessibleInterval<UnsignedShortType> stored =
+				stored(new long[] { SZ, SY, SX, NC }, 3, -1);
+		final RandomAccessibleInterval<UnsignedShortType> out = OmeZarrImageLoader.extract3D(
+				stored, new HyperSlice(new int[] { 3 }, new long[] { 2 }, false, new int[] { 2, 1, 0 }));
+
+		assertSize(out, SX, SY, SZ);
+		assertPlane(out, 2, 0);
+	}
+
+	@Test
+	public void plane2D_permutedAxes_padsZThenReorders() {
+		// A 2D (c,x,y) image is stored as (y,x,c): x is dim 1, and the appended z
+		// lands at dim 2, so only x and y have to swap.
+		final RandomAccessibleInterval<UnsignedShortType> stored = stored(new long[] { SY, SX, NC }, 2, -1);
+		final RandomAccessibleInterval<UnsignedShortType> out = OmeZarrImageLoader.extract3D(
+				stored, new HyperSlice(new int[] { 2 }, new long[] { 3 }, true, new int[] { 1, 0, 2 }));
+
+		assertSize(out, SX, SY, 1);
+		assertPlane(out, 3, 0);
+	}
+
 	// --- the defensive fallback for a view with no descriptor ------------------
 
 	@Test
@@ -166,6 +201,45 @@ public class ExtractTo3DTest {
 
 	private static int code(final int c, final int t) {
 		return 100 * c + t + 1;
+	}
+
+	/** An array in which every voxel is stamped with its own flattened position. */
+	private static RandomAccessibleInterval<UnsignedShortType> positions(final long[] dims) {
+		final ArrayImg<UnsignedShortType, ?> img = ArrayImgs.unsignedShorts(dims);
+		final Cursor<UnsignedShortType> cursor = img.localizingCursor();
+		int next = 1;
+		while (cursor.hasNext()) {
+			cursor.fwd();
+			cursor.get().set(next++);
+		}
+		return img;
+	}
+
+	/**
+	 * Asserts {@code out} holds exactly {@code stored}'s voxels, moved rather than
+	 * resampled: {@code out} at {@code p} must be {@code stored} at the position
+	 * {@code p} maps back to, where {@code order[k]} is the stored dimension that
+	 * became {@code k}.
+	 */
+	private static void assertSameVoxels(final RandomAccessibleInterval<UnsignedShortType> out,
+			final RandomAccessibleInterval<UnsignedShortType> stored, final int[] order) {
+		final RandomAccess<UnsignedShortType> outAccess = out.randomAccess();
+		final RandomAccess<UnsignedShortType> storedAccess = stored.randomAccess();
+		final long[] p = new long[3];
+		final long[] q = new long[3];
+		for (p[2] = 0; p[2] <= out.max(2); p[2]++) {
+			for (p[1] = 0; p[1] <= out.max(1); p[1]++) {
+				for (p[0] = 0; p[0] <= out.max(0); p[0]++) {
+					for (int k = 0; k < 3; k++) {
+						q[order[k]] = p[k];
+					}
+					outAccess.setPosition(p);
+					storedAccess.setPosition(q);
+					assertEquals("voxel (" + p[0] + "," + p[1] + "," + p[2] + ")",
+							storedAccess.get().get(), outAccess.get().get());
+				}
+			}
+		}
 	}
 
 	private static void assertSize(final RandomAccessibleInterval<?> out,

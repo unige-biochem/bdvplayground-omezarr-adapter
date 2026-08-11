@@ -11,7 +11,7 @@
 
 	<groupId>ch.unige.biochem</groupId>
 	<artifactId>bigdataviewer-omezarr-adapter</artifactId>
-	<version>0.1.0-SNAPSHOT</version>
+	<version>0.1.99-SNAPSHOT</version>
 
 	<name>OME-Zarr adapter for BigDataViewer-Playground</name>
 	<description>Opens OME-Zarr (OME-NGFF v0.4 / v0.5) as SpimData for BigDataViewer and BigDataViewer-Playground.</description>
@@ -120,6 +120,15 @@
 		<dependency>
 			<groupId>org.janelia.saalfeldlab</groupId>
 			<artifactId>n5-universe</artifactId>
+		</dependency>
+
+		<!-- Comes in transitively via n5-universe, but the opener asks the Zarr
+		     dataset attributes directly which dimension each NGFF axis ended up at
+		     (row-major arrays are reversed, column-major ones are not), so declare
+		     it explicitly. Version managed by pom-scijava. -->
+		<dependency>
+			<groupId>org.janelia.saalfeldlab</groupId>
+			<artifactId>n5-zarr</artifactId>
 		</dependency>
 
 		<!-- Comes in transitively via n5-universe -> n5-aws-s3, but S3Options

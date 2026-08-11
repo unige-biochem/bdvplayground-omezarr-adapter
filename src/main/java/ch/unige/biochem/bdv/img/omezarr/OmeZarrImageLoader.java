@@ -44,20 +44,24 @@ import java.util.Map;
  * {@link OmeZarrN5Properties} for the OME-NGFF layout, and reduces the stored
  * {@code nD} array to the 3D view of a single {@code (setup, timepoint)}.
  * <p>
- * NGFF stores its axes in the order {@code (t,c,z,y,x)} and n5/imglib2 reverses
- * them, so a 3D image maps to {@code (x,y,z,c,t)} and a 2D one — which has no
- * {@code z} axis at all — to {@code (x,y,c,t)}. Which imglib2 dimension is which
- * is therefore image-dependent, and is described per view by a {@link HyperSlice}
+ * NGFF names its axes rather than fixing their order: the canonical layout is
+ * {@code (t,c,z,y,x)}, which n5/imglib2 reverses into {@code (x,y,z,c,t)}, but the
+ * spec only <i>recommends</i> {@code zyx} for the spatial axes and a container may
+ * legitimately store e.g. {@code (c,x,y,z)}. Nor is the reversal itself a given —
+ * n5-zarr only reverses row-major arrays. Which imglib2 dimension is which is
+ * therefore image-dependent, and is described per view by a {@link HyperSlice}
  * precomputed by {@link OmeZarrOpener}: it fixes the {@code c}/{@code t} axes at
- * that view's indices and, for a 2D image, appends a singleton {@code z} so the
- * result is the single-slice volume BigDataViewer expects.
+ * that view's indices, appends a singleton {@code z} for a 2D image so the result
+ * is the single-slice volume BigDataViewer expects, and reorders what is left into
+ * the {@code (x,y,z)} BigDataViewer assumes.
  */
 public class OmeZarrImageLoader extends N5ImageLoader {
 
 	/**
 	 * How to reduce one stored {@code nD} array to the 3D {@code (x,y,z)} view of a
 	 * single {@code (setup, timepoint)}: hyperslice the non-spatial axes at fixed
-	 * indices, then append a singleton {@code z} if the image has no {@code z} axis.
+	 * indices, append a singleton {@code z} if the image has no {@code z} axis, then
+	 * reorder the three that remain into {@code (x,y,z)}.
 	 */
 	public static final class HyperSlice {
 
@@ -70,10 +74,25 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 		/** whether to append a singleton z, i.e. whether the image is 2D. */
 		final boolean appendZ;
 
+		/**
+		 * Where x, y and z sit once {@link #dims} have been sliced away and the
+		 * singleton z (if any) appended: {@code order[k]} is the dimension of that
+		 * view which must end up at {@code k}. {@code {0,1,2}} — the identity — for
+		 * the canonical NGFF layout.
+		 */
+		final int[] order;
+
+		/** A reduction that leaves the surviving dimensions in storage order. */
 		public HyperSlice(final int[] dims, final long[] indices, final boolean appendZ) {
+			this(dims, indices, appendZ, new int[] { 0, 1, 2 });
+		}
+
+		public HyperSlice(final int[] dims, final long[] indices, final boolean appendZ,
+				final int[] order) {
 			this.dims = dims;
 			this.indices = indices;
 			this.appendZ = appendZ;
+			this.order = order;
 		}
 	}
 
@@ -211,8 +230,15 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 	/**
 	 * Reduces a stored {@code nD} volume to the 3D {@code (x,y,z)} view described by
 	 * {@code hs}: hyperslices the c/t dimensions — from the highest down, so the
-	 * remaining dimension indices stay valid — and appends a singleton {@code z} for
-	 * a 2D image, yielding a {@code z} extent of exactly {@code [0,0]}.
+	 * remaining dimension indices stay valid — appends a singleton {@code z} for a 2D
+	 * image, yielding a {@code z} extent of exactly {@code [0,0]}, and finally
+	 * reorders the surviving dimensions into {@code (x,y,z)}.
+	 * <p>
+	 * The reordering is what makes a container that stores its spatial axes in a
+	 * non-canonical order — {@code (c,x,y,z)}, say — line up with the dimensions and
+	 * mipmap resolutions {@link OmeZarrN5Properties} declares, which are always
+	 * {@code (x,y,z)}. Without it the two disagree and BigDataViewer places each
+	 * resolution level somewhere different.
 	 *
 	 * @param hs the reduction to apply, or {@code null} for an unmapped view, in
 	 *           which case any dimension beyond the third is dropped at its minimum
@@ -230,6 +256,35 @@ public class OmeZarrImageLoader extends N5ImageLoader {
 		for (int i = hs.dims.length - 1; i >= 0; i--) {
 			out = Views.hyperSlice(out, hs.dims[i], hs.indices[i]);
 		}
-		return hs.appendZ ? Views.addDimension(out, 0, 0) : out;
+		if (hs.appendZ) {
+			out = Views.addDimension(out, 0, 0);
+		}
+		return reorder(out, hs.order);
+	}
+
+	/**
+	 * Permutes {@code volume} so that {@code order[k]} becomes dimension {@code k},
+	 * as a sequence of transpositions. A no-op for the identity order, which is what
+	 * every canonical container yields.
+	 */
+	private static <T> RandomAccessibleInterval<T> reorder(RandomAccessibleInterval<T> volume,
+			final int[] order) {
+		// at[d] is the dimension of the original volume currently sitting at d.
+		final int[] at = new int[volume.numDimensions()];
+		for (int d = 0; d < at.length; d++) {
+			at[d] = d;
+		}
+		for (int d = 0; d < order.length; d++) {
+			int from = d;
+			while (from < at.length && at[from] != order[d]) {
+				from++;
+			}
+			if (from != d && from < at.length) {
+				volume = Views.permute(volume, d, from);
+				at[from] = at[d];
+				at[d] = order[d];
+			}
+		}
+		return volume;
 	}
 }

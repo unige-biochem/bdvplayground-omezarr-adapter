@@ -68,6 +68,12 @@ SpimData entities compare by id alone. The name is for display.
   volumes**: `z` has size 1, voxel depth 1 and no calibration along `z`, and only
   `x`/`y` are downsampled across resolution levels.
 - **HCS plates** — a container whose root carries a `plate` attribute. See below.
+- **Non-canonical axis orders.** NGFF identifies axes by name and only
+  *recommends* the canonical `zyx` spatial order, so a container may legitimately
+  store e.g. `(c,x,y,z)` — webKnossos does. Axes are resolved by name, and the
+  volume is reordered to the `(x,y,z)` BigDataViewer expects. Column-major
+  (`order: "F"`) Zarr v2 arrays are handled too: n5 keeps its fastest-varying
+  axis at dimension 0, so it reverses row-major arrays but not column-major ones.
 
 Both v0.4 (Zarr v2) and v0.5 (Zarr v3) are auto-detected. Remote URLs
 (`https://…`, S3) and local paths are accepted.

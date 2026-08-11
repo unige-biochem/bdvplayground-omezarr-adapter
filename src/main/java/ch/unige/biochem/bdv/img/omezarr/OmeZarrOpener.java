@@ -53,7 +53,10 @@ import spimdata.util.Field;
 import spimdata.util.ImageName;
 import spimdata.util.Plate;
 import spimdata.util.Well;
+import org.janelia.saalfeldlab.n5.DatasetAttributes;
 import org.janelia.saalfeldlab.n5.N5Reader;
+import org.janelia.saalfeldlab.n5.zarr.ZarrDatasetAttributes;
+import org.janelia.saalfeldlab.n5.zarr.v3.ZarrV3DatasetAttributes;
 import org.janelia.saalfeldlab.n5.universe.N5Factory;
 import org.janelia.saalfeldlab.n5.universe.StorageFormat;
 import org.janelia.saalfeldlab.n5.universe.metadata.axes.Axis;
@@ -1062,13 +1065,20 @@ public class OmeZarrOpener {
 			throw new IllegalArgumentException("No multiscale metadata at " + path);
 		}
 
-		// Map NGFF axes (file order t,c,z,y,x) to imglib2 dims (reversed).
 		final Axis[] axes = ms.axes;
 		final int nAxes = axes.length;
-		int posX = -1;
+		final String level0Path = path + "/" + ms.datasets[0].path;
+		final DatasetAttributes attributes = n5.getDatasetAttributes(level0Path);
+		final long[] dims = attributes.getDimensions();
+
+		// Which imglib2 dim each NGFF axis ended up at, and — separately — where its
+		// scale sits in the coordinateTransformations vectors. The two are not the
+		// same thing, and only coincide for the canonical row-major layout.
+		final int[] axisToDim = axisToDimension(attributes, axes);
+		int posX = -1, posY = -1, posZ = -1;
 		int dimX = -1, dimY = -1, dimZ = -1, dimC = -1, dimT = -1;
 		for (int p = 0; p < nAxes; p++) {
-			final int dim = nAxes - 1 - p;
+			final int dim = axisToDim[p];
 			final String type = axes[p].getType();
 			final String name = axes[p].getName();
 			if (Axis.CHANNEL.equalsIgnoreCase(type)) {
@@ -1077,8 +1087,8 @@ public class OmeZarrOpener {
 				dimT = dim;
 			} else if (Axis.SPACE.equalsIgnoreCase(type) || type == null) {
 				if ("x".equalsIgnoreCase(name)) { dimX = dim; posX = p; }
-				else if ("y".equalsIgnoreCase(name)) { dimY = dim; }
-				else if ("z".equalsIgnoreCase(name)) { dimZ = dim; }
+				else if ("y".equalsIgnoreCase(name)) { dimY = dim; posY = p; }
+				else if ("z".equalsIgnoreCase(name)) { dimZ = dim; posZ = p; }
 			}
 		}
 		if (dimX < 0 || dimY < 0) {
@@ -1086,12 +1096,10 @@ public class OmeZarrOpener {
 					"Image at " + path + " lacks the x and y spatial axes.");
 		}
 
-		final String level0Path = path + "/" + ms.datasets[0].path;
-		final long[] dims = n5.getDatasetAttributes(level0Path).getDimensions();
-
 		final ImageInfo info = new ImageInfo();
 		info.path = path;
 		info.name = usableName(ms.name);
+		info.nAxes = nAxes;
 		info.dimX = dimX;
 		info.dimY = dimY;
 		info.dimZ = dimZ;
@@ -1102,16 +1110,23 @@ public class OmeZarrOpener {
 		// BDV sources are 3D, so a 2D image (no z axis) becomes a single z slice.
 		info.size = new FinalDimensions(dims[dimX], dims[dimY], dimZ >= 0 ? dims[dimZ] : 1);
 
-		// scale/translation come back in imglib2 dim order (see note in class doc).
+		// scale/translation come back reversed relative to the axes, whatever the
+		// array's own dimension order: openReader() registers a
+		// CoordinateTransformationAdapter, which reverses them by default, while the
+		// axes themselves are deserialized as written. So they are indexed by the
+		// axis's mirrored *file* position, never by its imglib2 dim.
 		// Without a z axis there is nothing to calibrate along z: keep it identity.
+		final int idxX = nAxes - 1 - posX;
+		final int idxY = nAxes - 1 - posY;
+		final int idxZ = posZ >= 0 ? nAxes - 1 - posZ : -1;
 		final double[] scale = level0Transform(ms.datasets[0], true);
 		final double[] trans = level0Transform(ms.datasets[0], false);
-		final double sx = scale != null ? scale[dimX] : 1.0;
-		final double sy = scale != null ? scale[dimY] : 1.0;
-		final double sz = (scale != null && dimZ >= 0) ? scale[dimZ] : 1.0;
-		final double tx = trans != null ? trans[dimX] : 0.0;
-		final double ty = trans != null ? trans[dimY] : 0.0;
-		final double tz = (trans != null && dimZ >= 0) ? trans[dimZ] : 0.0;
+		final double sx = scale != null ? scale[idxX] : 1.0;
+		final double sy = scale != null ? scale[idxY] : 1.0;
+		final double sz = (scale != null && idxZ >= 0) ? scale[idxZ] : 1.0;
+		final double tx = trans != null ? trans[idxX] : 0.0;
+		final double ty = trans != null ? trans[idxY] : 0.0;
+		final double tz = (trans != null && idxZ >= 0) ? trans[idxZ] : 0.0;
 
 		final String unit = axes[posX].getUnit() != null ? axes[posX].getUnit() : "pixel";
 		info.voxel = new FinalVoxelDimensions(unit, sx, sy, sz);
@@ -1126,14 +1141,14 @@ public class OmeZarrOpener {
 		info.levelNames = new String[nLevels];
 		info.levelPaths = new String[nLevels];
 		info.mipmapResolutions = new double[nLevels][3];
-		final int[] spatialDims = { dimX, dimY, dimZ };
+		final int[] spatialIdx = { idxX, idxY, idxZ };
 		for (int l = 0; l < nLevels; l++) {
 			info.levelNames[l] = ms.datasets[l].path;
 			info.levelPaths[l] = path + "/" + info.levelNames[l];
 			final double[] scaleL = level0Transform(ms.datasets[l], true);
 			for (int k = 0; k < 3; k++) {
 				// A 2D image (d < 0 for z) only downsamples in x/y: keep z at 1.
-				final int d = spatialDims[k];
+				final int d = spatialIdx[k];
 				final double r = (d >= 0 && scaleL != null && scale != null && scale[d] != 0.0)
 						? scaleL[d] / scale[d] : 1.0;
 				info.mipmapResolutions[l][k] = Math.round(r * 10000) / 10000d;
@@ -1154,6 +1169,8 @@ public class OmeZarrOpener {
 		String path;
 		/** The image's stored {@code multiscales} name, or {@code null} if unusable. */
 		String name;
+		/** number of axes of the stored array, c/t included. */
+		int nAxes;
 		/** imglib2 dim of each axis, or -1 when the image has no such axis. */
 		int dimX, dimY, dimZ, dimC, dimT;
 		int sizeC, sizeT;
@@ -1193,6 +1210,7 @@ public class OmeZarrOpener {
 			// name is deliberately not copied: it belongs to the field it was parsed
 			// from, and reusing it would give every field of the plate the same name.
 			// Field images are named after their well and field anyway (see imageName).
+			copy.nAxes = nAxes;
 			copy.dimX = dimX;
 			copy.dimY = dimY;
 			copy.dimZ = dimZ;
@@ -1217,8 +1235,9 @@ public class OmeZarrOpener {
 	/**
 	 * Describes, for {@link OmeZarrImageLoader}, how to reduce {@code img}'s stored
 	 * array to the 3D view of channel {@code c} at timepoint {@code t}: the c/t axes
-	 * are pinned at their imglib2 dimensions (which depend on the image's axes), and
-	 * a 2D image additionally gets a singleton z appended.
+	 * are pinned at their imglib2 dimensions (which depend on the image's axes), a 2D
+	 * image additionally gets a singleton z appended, and the three that remain are
+	 * reordered into {@code (x,y,z)}.
 	 */
 	private static HyperSlice hyperSlice(final ImageInfo img, final int c, final int t) {
 		final int n = (img.dimC >= 0 ? 1 : 0) + (img.dimT >= 0 ? 1 : 0);
@@ -1233,10 +1252,81 @@ public class OmeZarrOpener {
 			final int d = dims[0]; dims[0] = dims[1]; dims[1] = d;
 			final long x = indices[0]; indices[0] = indices[1]; indices[1] = x;
 		}
-		return new HyperSlice(dims, indices, img.dimZ < 0);
+		// Slicing the c/t dims away shifts every higher dim down; a 2D image's z is
+		// the one appended afterwards, which lands past what is left.
+		final int[] order = {
+				afterSlicing(img.dimX, dims),
+				afterSlicing(img.dimY, dims),
+				img.dimZ >= 0 ? afterSlicing(img.dimZ, dims) : img.nAxes - n };
+		return new HyperSlice(dims, indices, img.dimZ < 0, order);
 	}
 
-	/** Extracts the level-0 scale (or translation) vector, in NGFF axes order. */
+	/** Where dimension {@code dim} sits once the (ascending) {@code sliced} are gone. */
+	private static int afterSlicing(final int dim, final int[] sliced) {
+		int shift = 0;
+		for (final int s : sliced) {
+			if (s < dim) {
+				shift++;
+			}
+		}
+		return dim - shift;
+	}
+
+	/**
+	 * The imglib2 dimension each NGFF axis ended up at, {@code map[axisPosition] =
+	 * dim}.
+	 * <p>
+	 * n5 keeps its fastest-varying axis at dimension 0, so n5-zarr reverses a
+	 * row-major (Zarr {@code order: "C"}) array's shape but leaves a column-major
+	 * ({@code "F"}) one alone — the layout webKnossos writes. Assuming the reversal
+	 * would put every axis of such a container at the wrong dimension. Zarr v3 states
+	 * the answer outright in {@code dimension_names}, which n5-zarr reverses in step
+	 * with the shape, so those names are already indexed by imglib2 dimension and are
+	 * used whenever they line up with the {@code multiscales} axes.
+	 */
+	private static int[] axisToDimension(final DatasetAttributes attributes, final Axis[] axes) {
+		final int n = axes.length;
+		final int[] map = new int[n];
+		if (attributes instanceof ZarrV3DatasetAttributes
+				&& byDimensionNames(((ZarrV3DatasetAttributes) attributes).getDimensionNames(), axes, map)) {
+			return map;
+		}
+		final boolean reversed = !(attributes instanceof ZarrDatasetAttributes)
+				|| ((ZarrDatasetAttributes) attributes).isRowMajor();
+		for (int p = 0; p < n; p++) {
+			map[p] = reversed ? n - 1 - p : p;
+		}
+		return map;
+	}
+
+	/**
+	 * Fills {@code map} by matching each axis against {@code names}, or answers
+	 * {@code false} — leaving {@code map} to the caller — if the two do not describe
+	 * the same axes one-to-one, which makes the names unusable as a mapping.
+	 */
+	private static boolean byDimensionNames(final String[] names, final Axis[] axes, final int[] map) {
+		if (names == null || names.length != axes.length) {
+			return false;
+		}
+		for (int p = 0; p < axes.length; p++) {
+			int found = -1;
+			for (int d = 0; d < names.length; d++) {
+				if (names[d] != null && names[d].equals(axes[p].getName())) {
+					if (found >= 0) {
+						return false; // a repeated name cannot identify a dimension
+					}
+					found = d;
+				}
+			}
+			if (found < 0) {
+				return false;
+			}
+			map[p] = found;
+		}
+		return true;
+	}
+
+	/** Extracts the level-0 scale (or translation) vector, reversed w.r.t. the axes. */
 	private static double[] level0Transform(final OmeNgffDataset dataset, final boolean scale) {
 		if (dataset.coordinateTransformations == null) return null;
 		for (final CoordinateTransformation<?> ct : dataset.coordinateTransformations) {
