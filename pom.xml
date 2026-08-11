@@ -11,7 +11,7 @@
 
 	<groupId>ch.unige.biochem</groupId>
 	<artifactId>bigdataviewer-omezarr-adapter</artifactId>
-	<version>0.1.0-SNAPSHOT</version>
+	<version>0.1.1-SNAPSHOT</version>
 
 	<name>OME-Zarr adapter for BigDataViewer-Playground</name>
 	<description>Opens OME-Zarr (OME-NGFF v0.4 / v0.5) as SpimData for BigDataViewer and BigDataViewer-Playground.</description>
